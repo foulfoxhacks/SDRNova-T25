@@ -7,7 +7,9 @@ import java.io.IOException
  * and R828DEmbeddedTuner. Register writes go through a shadow copy so unchanged values are never resent.
  * Callers must hold the RTL2832 I2C repeater open around every method here.
  */
-internal class R82xxTuner(private val rtl: Rtl2832, val type: Type, private val isBlogV4: Boolean) {
+internal class R82xxTuner(private val rtl: Rtl2832, val type: Type, private val isBlogV4: Boolean) : RtlTuner {
+    override val label: String get() = type.label
+
 
     enum class Type(val label: String, val i2cAddress: Int, val vcoPowerRef: Int) {
         R820T("R820T", 0x34, 2),
@@ -19,7 +21,7 @@ internal class R82xxTuner(private val rtl: Rtl2832, val type: Type, private val 
         0x6C, 0x83, 0x80, 0x00, 0x0F, 0x00, 0xC0, 0x30, 0x48, 0xCC, 0x60, 0x00, 0x54, 0xAE, 0x4A, 0xC0,
     )
 
-    fun init() {
+    override fun init() {
         // Low-IF operation: disable zero-IF, use only the in-phase ADC, and shift the 3.57 MHz IF back to DC.
         rtl.writeDemod(1, 0xB1, 0x1A, 1)
         rtl.writeDemod(0, 0x08, 0x4D, 1)
@@ -31,7 +33,7 @@ internal class R82xxTuner(private val rtl: Rtl2832, val type: Type, private val 
         systemFrequencySelect()
     }
 
-    fun setFrequency(hz: Long) {
+    override fun setFrequency(hz: Long) {
         val lo = hz + IF_FREQUENCY
         setMux(lo)
         setPll(lo)
@@ -62,8 +64,7 @@ internal class R82xxTuner(private val rtl: Rtl2832, val type: Type, private val 
         }
     }
 
-    /** [step] indexes [com.sdrnova.t25.source.IqSource.GAIN_STEPS]; null selects automatic gain. */
-    fun setGain(step: Int?) {
+    override fun setGain(step: Int?) {
         if (step == null) {
             write(Reg.LNA_GAIN, 0x00)
             write(Reg.MIXER_GAIN, 0x10)

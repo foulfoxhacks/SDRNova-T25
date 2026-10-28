@@ -19,7 +19,7 @@ class RtlSdrUsbSource private constructor(
     private val usbInterface: UsbInterface,
     private val endpoint: UsbEndpoint,
     private val rtl: Rtl2832,
-    private val tuner: R82xxTuner,
+    private val tuner: RtlTuner,
     override val description: String,
     override val sampleRate: Int,
 ) : IqSource {
@@ -146,12 +146,11 @@ class RtlSdrUsbSource private constructor(
 
                 val rtl = Rtl2832(connection)
                 rtl.initBaseband()
-                val type = detectTuner(rtl) ?: throw IOException(
-                    "Unsupported tuner chip. SDRNova T25 currently drives R820T, R820T2 and R828D dongles.",
-                )
                 val blogV4 = runCatching { device.manufacturerName == "RTLSDRBlog" && device.productName == "Blog V4" }
                     .getOrDefault(false)
-                val tuner = R82xxTuner(rtl, type, blogV4)
+                val tuner = detectTuner(rtl, blogV4) ?: throw IOException(
+                    "Unsupported tuner chip. SDRNova T25 drives R820T, R820T2, R828D and FC0013 dongles.",
+                )
                 rtl.setI2cRepeater(true)
                 try {
                     tuner.init()
@@ -161,20 +160,23 @@ class RtlSdrUsbSource private constructor(
                 rtl.setSampleRate(sampleRate)
                 val name = runCatching { device.productName }.getOrNull() ?: "RTL-SDR"
                 val label = if (blogV4) "RTL-SDR Blog V4" else name
-                return RtlSdrUsbSource(connection, usbInterface, endpoint, rtl, tuner, "$label (${type.label})", sampleRate)
+                return RtlSdrUsbSource(connection, usbInterface, endpoint, rtl, tuner, "$label (${tuner.label})", sampleRate)
             } catch (e: Exception) {
                 connection.close()
                 throw e
             }
         }
 
-        private fun detectTuner(rtl: Rtl2832): R82xxTuner.Type? {
+        /** Probes each supported chip's ID register, as sdrtrunk and librtlsdr do. */
+        private fun detectTuner(rtl: Rtl2832, blogV4: Boolean): RtlTuner? {
             rtl.setI2cRepeater(true)
             try {
                 for (type in R82xxTuner.Type.entries) {
                     val id = runCatching { rtl.i2cReadRegister(type.i2cAddress, 0x00) }.getOrNull()
-                    if (id == 0x69) return type
+                    if (id == 0x69) return R82xxTuner(rtl, type, blogV4)
                 }
+                val fc0013 = runCatching { rtl.i2cReadRegister(Fc0013Tuner.ADDRESS, 0x00) }.getOrNull()
+                if (fc0013 == Fc0013Tuner.CHIP_ID) return Fc0013Tuner(rtl)
                 return null
             } finally {
                 rtl.setI2cRepeater(false)

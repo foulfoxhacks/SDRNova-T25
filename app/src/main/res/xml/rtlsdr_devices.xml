@@ -20,4 +20,7 @@
     <usb-device vendor-id="7040" product-id="54164" /> <!-- 1b80:d394 DIKOM USB-DVBT HD -->
     <usb-device vendor-id="7040" product-id="54165" /> <!-- 1b80:d395 Peak 102569AGPK -->
     <usb-device vendor-id="7040" product-id="54173" /> <!-- 1b80:d39d SVEON STV20 -->
+    <usb-device vendor-id="7504" product-id="24713" /> <!-- 1d50:6089 HackRF One -->
+    <usb-device vendor-id="7504" product-id="24651" /> <!-- 1d50:604b HackRF Jawbreaker -->
+    <usb-device vendor-id="7504" product-id="52245" /> <!-- 1d50:cc15 rad1o -->
 </resources>

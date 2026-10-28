@@ -125,6 +125,40 @@ class ReceiverTest {
     }
 
     @Test
+    fun `decodes an AMBTC group voice grant`() {
+        val header = TsbkBuilder(opcode = 0)
+            .set(0, 8, 0x57) // A/N 0, outbound, format 0x17 (AMBTC)
+            .set(10, 6, 61) // trunking control SAP
+            .set(24, 24, 0x0BEEF1) // source
+            .set(48, 8, 0x81) // FMF, one block to follow
+            .set(58, 6, 0x00) // GRP_V_CH_GRANT
+            .set(64, 8, 0x40) // encrypted
+            .build()
+        val block = ByteArray(12)
+        com.sdrnova.t25.p25.Bits.setField(block, 16, 4, 2)
+        com.sdrnova.t25.p25.Bits.setField(block, 20, 12, 0x155)
+        com.sdrnova.t25.p25.Bits.setField(block, 32, 4, 2)
+        com.sdrnova.t25.p25.Bits.setField(block, 36, 12, 0x255)
+        com.sdrnova.t25.p25.Bits.setField(block, 48, 16, 2468)
+
+        val random = Random(17)
+        val dibits = ArrayList<Int>()
+        repeat(120) { dibits += random.nextInt(4) }
+        repeat(6) {
+            SignalGenerator.pduFrame(0x293, listOf(header, block)).forEach { dibits += it }
+            SignalGenerator.tsduFrame(0x293, listOf(rfss())).forEach { dibits += it }
+        }
+        val iq = SignalGenerator.modulate(dibits.toIntArray(), inputRate, channelOffset, snrDb = 18.0, random = random)
+        val grants = run(iq).messages.filterIsInstance<GroupVoiceGrant>()
+        assertTrue(grants.size >= 4, "decoded ${grants.size} of 6 AMBTC grants")
+        val grant = grants.first()
+        assertEquals(2468, grant.group)
+        assertEquals(0x0BEEF1, grant.source)
+        assertEquals(com.sdrnova.t25.p25.Channel(2, 0x155), grant.channel)
+        assertTrue(grant.options.encrypted)
+    }
+
+    @Test
     fun `noise alone produces no messages`() {
         val result = run(SignalGenerator.noise(inputRate * 2, Random(3), sigma = 0.2))
         assertEquals(0, result.messages.size)

@@ -39,6 +39,8 @@ output somewhere short:
 ## What works in this build
 
 - RTL-SDR over USB OTG (R820T, R820T2, R828D including RTL-SDR Blog V4), or any `rtl_tcp` server, at 0.96, 1.92 or 2.4 MS/s
+- HackRF One over USB OTG at 2.4, 4.8 or 8 MS/s (signed 8-bit samples; LNA/VGA gain, antenna power)
+- AMBTC group voice channel grants (multi-block PDUs with explicit channels)
 - P25 Phase 1 control channel: sync, NID, TSBK decode with CRC, band plan, site identity, voice grants and grant updates resolved to frequencies, active and recent calls, talkgroup aliases
 - Traffic channel following: up to four voice channels decoded alongside the control channel, as long as they sit inside the tuner's bandwidth (like sdrtrunk with a single tuner)
 - LDU1/LDU2 decoding: IMBE voice frames, link control (talkgroup and radio ID, Hamming(10,6) + Reed-Solomon(24,12,13)), encryption sync (algorithm and key ID, Reed-Solomon(24,16,9)); TDU/TDULC end calls
@@ -49,9 +51,9 @@ output somewhere short:
 ## Not yet
 
 - HDU decoding and TDULC link control (both are only used as call boundaries for now)
-- PDU/AMBTC multi-block control messages
+- AMBTC opcodes other than the group voice grant are logged by name only; packet data PDUs are skipped
 - Phase 2 TDMA and DMR
-- E4000, FC0012/13 and FC2580 tuners; Airspy and HackRF
+- E4000, FC0012/13 and FC2580 tuners; Airspy
 
 ## Credits
 

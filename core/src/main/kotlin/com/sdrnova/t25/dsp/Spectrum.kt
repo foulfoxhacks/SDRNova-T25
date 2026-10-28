@@ -47,7 +47,7 @@ class Fft(val size: Int) {
     }
 }
 
-/** Power spectrum of raw u8 I/Q, in dBFS with the tuner centre frequency in the middle bin. */
+/** Power spectrum of float I/Q, in dBFS with the tuner centre frequency in the middle bin. */
 class SpectrumAnalyzer(val size: Int = 1024) {
     private val fft = Fft(size)
     private val window = FloatArray(size) { (0.5 - 0.5 * cos(2 * PI * it / (size - 1))).toFloat() }
@@ -55,12 +55,12 @@ class SpectrumAnalyzer(val size: Int = 1024) {
     private val re = FloatArray(size)
     private val im = FloatArray(size)
 
-    /** Returns null when [length] holds fewer than [size] complex samples. */
-    fun compute(bytes: ByteArray, length: Int): FloatArray? {
-        if (length < size * 2) return null
+    /** Returns null when fewer than [size] complex samples are available. */
+    fun compute(iq: FloatArray, samples: Int): FloatArray? {
+        if (samples < size) return null
         for (k in 0 until size) {
-            re[k] = ((bytes[2 * k].toInt() and 0xFF) - 127.5f) / 127.5f * window[k]
-            im[k] = ((bytes[2 * k + 1].toInt() and 0xFF) - 127.5f) / 127.5f * window[k]
+            re[k] = iq[2 * k] * window[k]
+            im[k] = iq[2 * k + 1] * window[k]
         }
         fft.transform(re, im)
         val out = FloatArray(size)

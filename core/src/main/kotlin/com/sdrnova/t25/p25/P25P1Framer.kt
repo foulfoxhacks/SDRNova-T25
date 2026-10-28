@@ -21,7 +21,7 @@ sealed interface P25Event {
  * decodes the NID, then decodes up to three TSBKs for a TSDU or the 1568-bit body of an LDU.
  */
 class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Sink {
-    private enum class State { IDLE, NID, TSDU, LDU, SKIP }
+    private enum class State { IDLE, NID, TSDU, LDU, PDU, SKIP }
 
     private var state = State.IDLE
     private var frameDibit = 0
@@ -36,13 +36,15 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
     private var lduNac = 0
     private var lduBody = ByteArray(Ldu.BODY_BITS / 8)
     private var lduBits = 0
+    private var pduHeader: Tsbk? = null
+    private val pduBlocks = ArrayList<ByteArray>()
     private val nacTracker = NacTracker()
 
     val nac: Int get() = nacTracker.nac
 
     override fun isSyncAllowed(): Boolean = when (state) {
         State.IDLE, State.SKIP -> true
-        State.NID, State.LDU -> false
+        State.NID, State.LDU, State.PDU -> false
         // Once a block fails its CRC we can't tell whether more follow, so let the next sync take over.
         State.TSDU -> lastBlockFailed
     }
@@ -67,6 +69,10 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
             State.TSDU -> {
                 block[blockCount++] = dibit
                 if (blockCount == 98) decodeBlock()
+            }
+            State.PDU -> {
+                block[blockCount++] = dibit
+                if (blockCount == 98) decodePduBlock()
             }
             State.LDU -> {
                 Bits.set(lduBody, lduBits++, dibit ushr 1)
@@ -114,9 +120,53 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
                 listener(P25Event.Terminator(result.nac, result.duid))
                 state = State.IDLE
             }
-            P25.DUID_PDU -> skip(98)
+            P25.DUID_PDU -> {
+                state = State.PDU
+                blockCount = 0
+                pduHeader = null
+                pduBlocks.clear()
+            }
             else -> state = State.IDLE
         }
+    }
+
+    /**
+     * PDU blocks are 98 dibits each. The header uses the TSBK code and CRC; only AMBTC data blocks (also 1/2 rate)
+     * are kept, other PDUs (packet data, which may use the 3/4 rate code) are skipped block by block.
+     */
+    private fun decodePduBlock() {
+        blockCount = 0
+        val decoded = Trellis12.decode(block)
+        val header = pduHeader
+        if (header == null) {
+            val candidate = Tsbk(decoded.bytes, decoded.bitErrors)
+            if (!candidate.crcValid) {
+                listener(P25Event.CrcFailed(candidate))
+                state = State.IDLE
+                return
+            }
+            val blocks = Ambtc.blocksToFollow(candidate)
+            when {
+                Ambtc.format(candidate) == Ambtc.FORMAT && blocks in 1..3 -> pduHeader = candidate
+                blocks > 0 -> skip(blocks * 98)
+                else -> state = State.IDLE
+            }
+            return
+        }
+        // Data blocks carry their own CRC-32 across the packet; the Viterbi metric screens out garbled blocks.
+        if (decoded.bitErrors > MAX_AMBTC_BLOCK_ERRORS) {
+            state = State.IDLE
+            return
+        }
+        pduBlocks += decoded.bytes
+        if (pduBlocks.size == Ambtc.blocksToFollow(header)) {
+            state = State.IDLE
+            listener(P25Event.Message(Ambtc.parse(header, pduBlocks.toList())))
+        }
+    }
+
+    private companion object {
+        const val MAX_AMBTC_BLOCK_ERRORS = 4
     }
 
     private fun skip(dibits: Int) {

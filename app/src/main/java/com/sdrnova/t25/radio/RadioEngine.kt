@@ -13,7 +13,7 @@ import com.sdrnova.t25.receiver.Mode
 import com.sdrnova.t25.receiver.TrunkedReceiver
 import com.sdrnova.t25.source.IqSource
 import com.sdrnova.t25.source.RtlTcpSource
-import com.sdrnova.t25.source.rtlsdr.RtlSdrUsbSource
+import com.sdrnova.t25.source.UsbRadios
 import com.sdrnova.t25.trunking.Call
 import com.sdrnova.t25.trunking.Neighbor
 import com.sdrnova.t25.trunking.SiteInfo
@@ -209,10 +209,10 @@ class RadioEngine(private val context: Context) {
         private fun openSource(): IqSource = when (config.source) {
             SourceType.RTL_TCP -> RtlTcpSource.connect(config.host, config.port, config.sampleRate)
             SourceType.USB -> {
-                val device = RtlSdrUsbSource.find(context) ?: throw IOException("No supported SDR is plugged in")
+                val device = UsbRadios.find(context) ?: throw IOException("No supported SDR is plugged in")
                 val manager = context.getSystemService(UsbManager::class.java)
-                if (!manager.hasPermission(device)) throw IOException("USB permission for the dongle was not granted")
-                RtlSdrUsbSource.open(context, device, config.sampleRate)
+                if (!manager.hasPermission(device)) throw IOException("USB permission for the radio was not granted")
+                UsbRadios.open(context, device, config.sampleRate)
             }
         }
 
@@ -250,9 +250,9 @@ class RadioEngine(private val context: Context) {
                 val samples = iq.format.toFloat(chunk.data, chunk.length, floats)
                 receiver.process(floats, samples)
                 sinceSpectrum += samples
-                if (sinceSpectrum >= iq.sampleRate / 8 && iq.format == com.sdrnova.t25.dsp.SampleFormat.UNSIGNED_8) {
+                if (sinceSpectrum >= iq.sampleRate / 8) {
                     sinceSpectrum = 0
-                    analyzer.compute(chunk.data, chunk.length)?.let { _spectrum.value = it }
+                    analyzer.compute(floats, samples)?.let { _spectrum.value = it }
                 }
                 pool.offer(chunk)
                 sincePublish += samples

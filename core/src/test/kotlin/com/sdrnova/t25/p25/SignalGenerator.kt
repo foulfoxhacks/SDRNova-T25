@@ -52,6 +52,10 @@ object SignalGenerator {
 
     fun tduFrame(nac: Int): IntArray = frame(nac, P25.DUID_TDU, List(14) { 0 })
 
+    /** A PDU: header block then data blocks, all 1/2 rate trellis coded (as AMBTC uses). */
+    fun pduFrame(nac: Int, blocks: List<ByteArray>): IntArray =
+        frame(nac, P25.DUID_PDU, blocks.flatMap { Trellis12.encode(it).toList() })
+
     private fun frame(nac: Int, duid: Int, data: List<Int>): IntArray {
         val payload = ArrayList<Int>()
         P25.SYNC_DIBITS.forEach { payload += it }

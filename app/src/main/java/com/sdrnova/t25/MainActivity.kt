@@ -24,7 +24,7 @@ import com.sdrnova.t25.radio.ConfigStore
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioService
 import com.sdrnova.t25.radio.SourceType
-import com.sdrnova.t25.source.rtlsdr.RtlSdrUsbSource
+import com.sdrnova.t25.source.UsbRadios
 import com.sdrnova.t25.ui.MainScreen
 import com.sdrnova.t25.ui.SdrNovaTheme
 
@@ -119,9 +119,9 @@ class MainActivity : ComponentActivity() {
             RadioService.start(this)
             return
         }
-        val device = RtlSdrUsbSource.find(this)
+        val device = UsbRadios.find(this)
         if (device == null) {
-            Toast.makeText(this, "Plug in an RTL-SDR dongle (use a USB OTG adapter)", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Plug in an RTL-SDR or HackRF (use a USB OTG adapter)", Toast.LENGTH_LONG).show()
             return
         }
         val manager = getSystemService(UsbManager::class.java)

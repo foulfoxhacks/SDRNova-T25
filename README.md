@@ -1,7 +1,5 @@
 SDRNova T25 
 ========
-[![Build](https://github.com/foulfoxhacks/SDRNova-T25/actions/workflows/android.yml/badge.svg)](https://github.com/foulfoxhacks/SDRNova-T25/actions/workflows/android.yml)
-========
 
 Trunk-tracking SDR scanner for Android
 

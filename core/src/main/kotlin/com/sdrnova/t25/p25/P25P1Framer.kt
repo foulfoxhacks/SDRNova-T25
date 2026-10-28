@@ -1,0 +1,130 @@
+package com.sdrnova.t25.p25
+
+sealed interface P25Event {
+    data class Sync(val bitErrors: Int, val frequencyErrorHz: Double) : P25Event
+    data class Nid(val nac: Int, val duid: Int, val bitErrors: Int) : P25Event
+    data object NidFailed : P25Event
+    data class Message(val message: TsbkMessage) : P25Event
+    data class CrcFailed(val tsbk: Tsbk) : P25Event
+    data class VoiceFrame(val nac: Int, val duid: Int) : P25Event
+}
+
+/**
+ * Assembles demodulated dibits into P25 Phase 1 frames, modeled on sdrtrunk's P25P1MessageFramer.
+ *
+ * After each sync it strips the status dibit sent after every 35 data dibits (counting from the first sync dibit),
+ * decodes the NID, then for TSDUs decodes up to three TSBKs. Voice and other data units are only counted for now.
+ */
+class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Sink {
+    private enum class State { IDLE, NID, TSDU, SKIP }
+
+    private var state = State.IDLE
+    private var frameDibit = 0
+    private var nidBits = 0L
+    private var nidCount = 0
+    private val block = IntArray(98)
+    private var blockCount = 0
+    private var blocksDone = 0
+    private var lastBlockFailed = false
+    private var skipRemaining = 0
+    private val nacTracker = NacTracker()
+
+    val nac: Int get() = nacTracker.nac
+
+    override fun isSyncAllowed(): Boolean = when (state) {
+        State.IDLE, State.SKIP -> true
+        State.NID -> false
+        // Once a block fails its CRC we can't tell whether more follow, so let the next sync take over.
+        State.TSDU -> lastBlockFailed
+    }
+
+    override fun onSync(bitErrors: Int, frequencyErrorHz: Double) {
+        listener(P25Event.Sync(bitErrors, frequencyErrorHz))
+        state = State.NID
+        frameDibit = 24
+        nidBits = 0
+        nidCount = 0
+    }
+
+    override fun onDibit(dibit: Int) {
+        if (state == State.IDLE) return
+        val index = frameDibit++
+        if (index % 36 == 35) return
+        when (state) {
+            State.NID -> {
+                nidBits = (nidBits shl 2) or dibit.toLong()
+                if (++nidCount == 32) decodeNid()
+            }
+            State.TSDU -> {
+                block[blockCount++] = dibit
+                if (blockCount == 98) decodeBlock()
+            }
+            State.SKIP -> if (--skipRemaining <= 0) state = State.IDLE
+            State.IDLE -> Unit
+        }
+    }
+
+    private fun decodeNid() {
+        // The 64th NID bit is a parity bit outside the BCH codeword.
+        val result = Bch63.decode(nidBits ushr 1, nacTracker.nac)
+        if (result == null) {
+            listener(P25Event.NidFailed)
+            state = State.IDLE
+            return
+        }
+        nacTracker.add(result.nac)
+        listener(P25Event.Nid(result.nac, result.duid, result.bitErrors))
+        when (result.duid) {
+            P25.DUID_TSDU -> {
+                state = State.TSDU
+                blockCount = 0
+                blocksDone = 0
+                lastBlockFailed = false
+            }
+            P25.DUID_LDU1, P25.DUID_LDU2 -> {
+                listener(P25Event.VoiceFrame(result.nac, result.duid))
+                skip(784)
+            }
+            P25.DUID_HDU -> skip(324)
+            P25.DUID_TDULC -> skip(144)
+            P25.DUID_PDU -> skip(98)
+            else -> state = State.IDLE
+        }
+    }
+
+    private fun skip(dibits: Int) {
+        state = State.SKIP
+        skipRemaining = dibits
+    }
+
+    private fun decodeBlock() {
+        blockCount = 0
+        blocksDone++
+        val decoded = Trellis12.decode(block)
+        val tsbk = Tsbk(decoded.bytes, decoded.bitErrors)
+        if (tsbk.crcValid) {
+            lastBlockFailed = false
+            listener(P25Event.Message(TsbkParser.parse(tsbk)))
+            if (tsbk.lastBlock || blocksDone == 3) state = State.IDLE
+        } else {
+            lastBlockFailed = true
+            listener(P25Event.CrcFailed(tsbk))
+            if (blocksDone == 3) state = State.IDLE
+        }
+    }
+}
+
+/** Remembers the most common NAC so the NID decoder can check it first. */
+class NacTracker {
+    private val counts = HashMap<Int, Int>()
+
+    var nac = -1
+        private set
+
+    fun add(value: Int) {
+        val count = (counts[value] ?: 0) + 1
+        counts[value] = count
+        if (count >= 3 && (nac < 0 || count > (counts[nac] ?: 0))) nac = value
+        if (counts.size > 32) counts.entries.removeIf { it.key != nac && it.value < 2 }
+    }
+}

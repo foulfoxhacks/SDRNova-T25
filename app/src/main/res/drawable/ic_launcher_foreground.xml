@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Antenna mast radiating two pairs of arcs, centred in the 66dp adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,50 L54,78 M46,78 L62,78"
+        android:strokeColor="#FF4FD1C5"
+        android:strokeLineCap="round"
+        android:strokeWidth="4" />
+    <path
+        android:fillColor="#FF4FD1C5"
+        android:pathData="M54,46m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M43,35 A16,16 0,0 0,43 57 M65,35 A16,16 0,0 1,65 57"
+        android:strokeColor="#FF4FD1C5"
+        android:strokeLineCap="round"
+        android:strokeWidth="4" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M35,28 A26,26 0,0 0,35 64 M73,28 A26,26 0,0 1,73 64"
+        android:strokeColor="#FFF6AD55"
+        android:strokeLineCap="round"
+        android:strokeWidth="4" />
+</vector>

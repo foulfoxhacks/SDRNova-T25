@@ -23,4 +23,5 @@
     <usb-device vendor-id="7504" product-id="24713" /> <!-- 1d50:6089 HackRF One -->
     <usb-device vendor-id="7504" product-id="24651" /> <!-- 1d50:604b HackRF Jawbreaker -->
     <usb-device vendor-id="7504" product-id="52245" /> <!-- 1d50:cc15 rad1o -->
+    <usb-device vendor-id="7504" product-id="24737" /> <!-- 1d50:60a1 Airspy R2 / Mini -->
 </resources>

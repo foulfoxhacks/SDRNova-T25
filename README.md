@@ -1,1 +1,1 @@
-# SDRNova-T25
+# SDRNova

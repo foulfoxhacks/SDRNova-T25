@@ -5,10 +5,12 @@ import android.hardware.usb.UsbManager
 import android.os.SystemClock
 import android.util.Log
 import com.sdrnova.t25.dsp.SpectrumAnalyzer
-import com.sdrnova.t25.p25.P25
+import com.sdrnova.t25.p25.IdentifierUpdate
+import com.sdrnova.t25.p25.Ldu
 import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.receiver.ChannelReceiver
 import com.sdrnova.t25.receiver.Mode
+import com.sdrnova.t25.receiver.TrunkedReceiver
 import com.sdrnova.t25.source.IqSource
 import com.sdrnova.t25.source.RtlTcpSource
 import com.sdrnova.t25.source.rtlsdr.RtlSdrUsbSource
@@ -16,7 +18,10 @@ import com.sdrnova.t25.trunking.Call
 import com.sdrnova.t25.trunking.Neighbor
 import com.sdrnova.t25.trunking.SiteInfo
 import com.sdrnova.t25.trunking.TrunkingTracker
-import com.sdrnova.t25.p25.IdentifierUpdate
+import com.sdrnova.t25.voice.VocoderLoader
+import com.sdrnova.t25.voice.VocoderProvider
+import com.sdrnova.t25.voice.VoiceDecoder
+import com.sdrnova.t25.voice.VoiceResampler
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
@@ -29,7 +34,10 @@ data class EngineStatus(
     val source: String? = null,
     val error: String? = null,
     val frequencyHz: Long = 0,
+    val centerHz: Long = 0,
+    val sampleRate: Int = 0,
     val mode: Mode = Mode.P25_PHASE1,
+    val vocoder: String? = null,
     val signalDbfs: Float = -100f,
     val afcHz: Double = 0.0,
     val nac: Int = -1,
@@ -37,12 +45,24 @@ data class EngineStatus(
     val syncs: Long = 0,
     val messages: Long = 0,
     val crcErrors: Long = 0,
-    val voiceFrames: Long = 0,
     val droppedBuffers: Long = 0,
+)
+
+/** A voice channel being decoded right now. */
+data class FollowedCall(
+    val id: Int,
+    val frequencyHz: Long,
+    val talkgroup: Int,
+    val source: Int?,
+    val unitToUnit: Boolean,
+    val encrypted: Boolean,
+    val voiceFrames: Int,
+    val playing: Boolean,
 )
 
 data class TrunkingView(
     val site: SiteInfo = SiteInfo(),
+    val following: List<FollowedCall> = emptyList(),
     val active: List<Call> = emptyList(),
     val recent: List<Call> = emptyList(),
     val neighbors: List<Neighbor> = emptyList(),
@@ -52,8 +72,8 @@ data class TrunkingView(
 data class LogLine(val time: Long, val text: String)
 
 /**
- * Owns the running radio: one thread reads I/Q from the source, another runs the DSP and decoder, and audio plays on
- * a third. The UI and the foreground service only see the state flows.
+ * Owns the running radio: one thread reads I/Q from the source, another runs the DSP, decoders and trunking, and
+ * audio plays on a third. The UI and the foreground service only see the state flows.
  */
 class RadioEngine(private val context: Context) {
     private val _status = MutableStateFlow(EngineStatus())
@@ -72,15 +92,13 @@ class RadioEngine(private val context: Context) {
     private val lock = Any()
     private var session: Session? = null
 
-    @Volatile
-    var config = RadioConfig()
-        private set
-
     fun start(config: RadioConfig) {
         synchronized(lock) {
             if (session != null) return
-            this.config = config
-            _status.value = EngineStatus(starting = true, frequencyHz = config.frequencyHz, mode = config.mode)
+            _status.value = EngineStatus(
+                starting = true, frequencyHz = config.frequencyHz, centerHz = config.effectiveCenterHz,
+                sampleRate = config.sampleRate, mode = config.mode,
+            )
             _trunking.value = TrunkingView()
             _log.value = emptyList()
             _spectrum.value = null
@@ -103,10 +121,13 @@ class RadioEngine(private val context: Context) {
     private inner class Session(private val config: RadioConfig) {
         private val queue = ArrayBlockingQueue<Chunk>(64)
         private val pool = ArrayBlockingQueue<Chunk>(80)
-        private val tracker = TrunkingTracker()
         private val analyzer = SpectrumAnalyzer(1024)
-        private val audio = AudioOutput()
         private val logLines = ArrayDeque<LogLine>()
+        private var audio: AudioOutput? = null
+        private var vocoder: VocoderProvider? = null
+        private val decoders = HashMap<Int, VoiceDecoder>()
+        private val resampler = VoiceResampler(48_000)
+        private var playingChannel: Int? = null
 
         @Volatile
         private var running = true
@@ -118,7 +139,6 @@ class RadioEngine(private val context: Context) {
         private var syncs = 0L
         private var messages = 0L
         private var crcErrors = 0L
-        private var voiceFrames = 0L
         private var lastSyncAt = 0L
         private var logChanged = false
 
@@ -135,17 +155,26 @@ class RadioEngine(private val context: Context) {
             var error: String? = null
             var reader: Thread? = null
             try {
+                require(ChannelReceiver.isSupportedRate(config.sampleRate)) { "Unsupported sample rate ${config.sampleRate}" }
                 val iq = openSource()
                 source = iq
                 iq.setGain(config.gainTenthsDb)
                 iq.setPpm(config.ppm)
                 if (config.biasTee) iq.setBiasTee(true)
-                iq.setCenterFrequency(config.frequencyHz + TUNER_OFFSET_HZ)
+                iq.setCenterFrequency(config.effectiveCenterHz)
                 if (!running) return
 
-                _status.value = _status.value.copy(running = true, starting = false, source = iq.description)
-                addLog("Listening on ${TrunkingTracker.mhz(config.frequencyHz)} (${config.mode.label}) via ${iq.description}")
-                if (config.mode == Mode.NBFM) audio.start()
+                if (config.mode == Mode.P25_PHASE1) vocoder = VocoderLoader.load(context)
+                _status.value = _status.value.copy(
+                    running = true, starting = false, source = iq.description, vocoder = vocoder?.name,
+                )
+                addLog(
+                    "Listening on ${TrunkingTracker.mhz(config.frequencyHz)} (${config.mode.label}) via ${iq.description}, " +
+                        "%.2f MS/s".format(iq.sampleRate / 1e6),
+                )
+                if (config.mode == Mode.P25_PHASE1) {
+                    addLog(vocoder?.let { "Voice audio through ${it.name}" } ?: "No vocoder installed: calls are followed without audio")
+                }
 
                 var readerError: Throwable? = null
                 reader = Thread({
@@ -158,7 +187,7 @@ class RadioEngine(private val context: Context) {
                     }
                 }, "radio-reader").apply { start() }
 
-                process(iq.sampleRate)
+                process(iq)
                 reader.join(2_000)
                 readerError?.let { throw it }
             } catch (t: Throwable) {
@@ -168,19 +197,22 @@ class RadioEngine(private val context: Context) {
                 running = false
                 source?.stop()
                 reader?.join(2_000)
-                audio.stop()
-                source?.let { runCatching { it.setBiasTee(false) }; runCatching { it.close() } }
+                audio?.stop()
+                source?.let {
+                    runCatching { it.setBiasTee(false) }
+                    runCatching { it.close() }
+                }
                 ended(this, error)
             }
         }
 
         private fun openSource(): IqSource = when (config.source) {
-            SourceType.RTL_TCP -> RtlTcpSource.connect(config.host, config.port)
+            SourceType.RTL_TCP -> RtlTcpSource.connect(config.host, config.port, config.sampleRate)
             SourceType.USB -> {
-                val device = RtlSdrUsbSource.find(context) ?: throw IOException("No RTL-SDR dongle is plugged in")
+                val device = RtlSdrUsbSource.find(context) ?: throw IOException("No supported SDR is plugged in")
                 val manager = context.getSystemService(UsbManager::class.java)
                 if (!manager.hasPermission(device)) throw IOException("USB permission for the dongle was not granted")
-                RtlSdrUsbSource.open(context, device)
+                RtlSdrUsbSource.open(context, device, config.sampleRate)
             }
         }
 
@@ -195,22 +227,30 @@ class RadioEngine(private val context: Context) {
             }
         }
 
-        private fun process(sampleRate: Int) {
-            val receiver = ChannelReceiver(sampleRate, config.mode, object : ChannelReceiver.Listener {
-                override fun onP25Event(event: P25Event) = handle(event)
-                override fun onAudio(samples: ShortArray, count: Int) = audio.write(samples, count)
-            })
-            receiver.channelOffsetHz = -TUNER_OFFSET_HZ.toDouble()
-            receiver.squelchThreshold = config.squelch
-            val publishEvery = sampleRate / 4
+        private fun process(iq: IqSource) {
+            val receiver = TrunkedReceiver(
+                inputRate = iq.sampleRate,
+                centerHz = config.effectiveCenterHz,
+                controlHz = config.frequencyHz,
+                mode = config.mode,
+                maxTrafficChannels = if (config.mode == Mode.P25_PHASE1) config.maxTrafficChannels else 0,
+                listener = Listener(),
+            )
+            receiver.control.squelchThreshold = config.squelch
+            if (config.mode == Mode.NBFM) audio = AudioOutput(receiver.control.channelRate).also { it.start() }
+            if (vocoder != null) audio = AudioOutput(48_000).also { it.start() }
+
+            var floats = FloatArray(0)
+            val publishEvery = iq.sampleRate / 4
             var sincePublish = 0
             var sinceSpectrum = 0
-            while (running || queue.isNotEmpty()) {
+            while (running) {
                 val chunk = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                receiver.process(chunk.data, chunk.length)
-                val samples = chunk.length / 2
+                if (floats.size < chunk.length) floats = FloatArray(chunk.length)
+                val samples = iq.format.toFloat(chunk.data, chunk.length, floats)
+                receiver.process(floats, samples)
                 sinceSpectrum += samples
-                if (sinceSpectrum >= sampleRate / 8) {
+                if (sinceSpectrum >= iq.sampleRate / 8 && iq.format == com.sdrnova.t25.dsp.SampleFormat.UNSIGNED_8) {
                     sinceSpectrum = 0
                     analyzer.compute(chunk.data, chunk.length)?.let { _spectrum.value = it }
                 }
@@ -220,27 +260,63 @@ class RadioEngine(private val context: Context) {
                     sincePublish = 0
                     publish(receiver)
                 }
-                if (!running) break
             }
         }
 
-        private fun handle(event: P25Event) {
-            when (event) {
-                is P25Event.Sync -> {
-                    syncs++
-                    lastSyncAt = SystemClock.elapsedRealtime()
+        private inner class Listener : TrunkedReceiver.Listener {
+            override fun onControlEvent(event: P25Event) {
+                when (event) {
+                    is P25Event.Sync -> {
+                        syncs++
+                        lastSyncAt = SystemClock.elapsedRealtime()
+                    }
+                    is P25Event.Message -> messages++
+                    is P25Event.CrcFailed -> crcErrors++
+                    else -> Unit
                 }
-                is P25Event.Message -> {
-                    messages++
-                    val alias = (event.message as? com.sdrnova.t25.p25.GroupVoiceGrant)?.let { config.aliases[it.group] }
-                    val text = tracker.onMessage(event.message)
-                    addLog(if (alias != null) "$text ($alias)" else text)
+            }
+
+            override fun onLog(text: String) = addLog(withAliases(text))
+
+            override fun onAudio(samples: ShortArray, count: Int) {
+                audio?.write(samples, count)
+            }
+
+            override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
+                addLog(withAliases("Following ${label(channel)} on ${TrunkingTracker.mhz(channel.frequencyHz)}"))
+            }
+
+            override fun onTrafficVoice(channel: TrunkedReceiver.TrafficChannel, ldu: Ldu) {
+                val provider = vocoder ?: return
+                if (channel.encrypted) return
+                if (playingChannel == null) playingChannel = channel.id
+                if (playingChannel != channel.id) return
+                val decoder = decoders.getOrPut(channel.id) { provider.createImbeDecoder() ?: return }
+                for (frame in ldu.voiceFrames) {
+                    val pcm = runCatching { decoder.decode(frame) }.getOrNull() ?: continue
+                    val samples = resampler.process(pcm)
+                    audio?.write(samples, samples.size)
                 }
-                is P25Event.CrcFailed -> crcErrors++
-                is P25Event.VoiceFrame -> {
-                    if (voiceFrames++ % 50 == 0L) addLog("Voice frames on NAC %03X (${P25.duidName(event.duid)})".format(event.nac))
-                }
-                is P25Event.Nid, P25Event.NidFailed -> Unit
+            }
+
+            override fun onTrafficEnd(channel: TrunkedReceiver.TrafficChannel, reason: String) {
+                decoders.remove(channel.id)
+                if (playingChannel == channel.id) playingChannel = null
+                val seconds = channel.voiceFrames / 50
+                addLog(withAliases("${label(channel)} ended after ${seconds}s ($reason)"))
+            }
+        }
+
+        private fun label(channel: TrunkedReceiver.TrafficChannel): String {
+            val who = if (channel.unitToUnit) "Private call to ${channel.talkgroup}" else "TG ${channel.talkgroup}"
+            val from = channel.source?.let { " from $it" } ?: ""
+            return who + from + if (channel.encrypted) " (encrypted)" else ""
+        }
+
+        private fun withAliases(text: String): String {
+            if (config.aliases.isEmpty()) return text
+            return TALKGROUP.replace(text) { match ->
+                config.aliases[match.groupValues[1].toInt()]?.let { "${match.value} [$it]" } ?: match.value
             }
         }
 
@@ -248,23 +324,29 @@ class RadioEngine(private val context: Context) {
             logLines.addFirst(LogLine(System.currentTimeMillis(), text))
             while (logLines.size > 400) logLines.removeLast()
             logChanged = true
-            if (!running) _log.value = logLines.toList()
+            if (!running || _status.value.starting) _log.value = logLines.toList()
         }
 
-        private fun publish(receiver: ChannelReceiver) {
+        private fun publish(receiver: TrunkedReceiver) {
             _status.value = _status.value.copy(
-                signalDbfs = receiver.signalDbfs,
-                afcHz = receiver.afcHz,
-                nac = receiver.nac,
+                signalDbfs = receiver.control.signalDbfs,
+                afcHz = receiver.control.afcHz,
+                nac = receiver.control.nac,
                 lastSyncAt = lastSyncAt,
                 syncs = syncs,
                 messages = messages,
                 crcErrors = crcErrors,
-                voiceFrames = voiceFrames,
                 droppedBuffers = dropped,
             )
+            val tracker = receiver.tracker
             _trunking.value = TrunkingView(
                 site = tracker.site,
+                following = receiver.trafficChannels.map {
+                    FollowedCall(
+                        it.id, it.frequencyHz, it.talkgroup, it.source, it.unitToUnit, it.encrypted, it.voiceFrames,
+                        playing = it.id == playingChannel,
+                    )
+                },
                 active = tracker.activeCalls(),
                 recent = tracker.recentCalls(),
                 neighbors = tracker.neighbors(),
@@ -279,6 +361,7 @@ class RadioEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "RadioEngine"
+        private val TALKGROUP = Regex("TG (\\d+)")
 
         /** The tuner sits this far above the channel so the dongle's DC spike stays out of the channel filter. */
         const val TUNER_OFFSET_HZ = 150_000L

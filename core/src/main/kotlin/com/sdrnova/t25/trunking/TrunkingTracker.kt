@@ -56,6 +56,8 @@ class TrunkingTracker(private val now: () -> Long = System::currentTimeMillis) {
 
     fun frequencyOf(channel: Channel): Long? = bands[channel.band]?.downlinkHz(channel.number)
 
+    fun bandOf(channel: Channel): IdentifierUpdate? = bands[channel.band]
+
     fun bandPlan(): List<IdentifierUpdate> = bands.values.sortedBy { it.identifier }
 
     fun neighbors(): List<Neighbor> = neighbors.values.toList()

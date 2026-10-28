@@ -6,17 +6,22 @@ sealed interface P25Event {
     data object NidFailed : P25Event
     data class Message(val message: TsbkMessage) : P25Event
     data class CrcFailed(val tsbk: Tsbk) : P25Event
-    data class VoiceFrame(val nac: Int, val duid: Int) : P25Event
+
+    /** A voice superframe half: nine IMBE frames plus link control (LDU1) or encryption sync (LDU2). */
+    data class Voice(val nac: Int, val ldu: Ldu) : P25Event
+
+    /** TDU or TDULC: the transmission ended. */
+    data class Terminator(val nac: Int, val duid: Int) : P25Event
 }
 
 /**
  * Assembles demodulated dibits into P25 Phase 1 frames, modeled on sdrtrunk's P25P1MessageFramer.
  *
  * After each sync it strips the status dibit sent after every 35 data dibits (counting from the first sync dibit),
- * decodes the NID, then for TSDUs decodes up to three TSBKs. Voice and other data units are only counted for now.
+ * decodes the NID, then decodes up to three TSBKs for a TSDU or the 1568-bit body of an LDU.
  */
 class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Sink {
-    private enum class State { IDLE, NID, TSDU, SKIP }
+    private enum class State { IDLE, NID, TSDU, LDU, SKIP }
 
     private var state = State.IDLE
     private var frameDibit = 0
@@ -27,13 +32,17 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
     private var blocksDone = 0
     private var lastBlockFailed = false
     private var skipRemaining = 0
+    private var lduDuid = 0
+    private var lduNac = 0
+    private var lduBody = ByteArray(Ldu.BODY_BITS / 8)
+    private var lduBits = 0
     private val nacTracker = NacTracker()
 
     val nac: Int get() = nacTracker.nac
 
     override fun isSyncAllowed(): Boolean = when (state) {
         State.IDLE, State.SKIP -> true
-        State.NID -> false
+        State.NID, State.LDU -> false
         // Once a block fails its CRC we can't tell whether more follow, so let the next sync take over.
         State.TSDU -> lastBlockFailed
     }
@@ -59,6 +68,15 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
                 block[blockCount++] = dibit
                 if (blockCount == 98) decodeBlock()
             }
+            State.LDU -> {
+                Bits.set(lduBody, lduBits++, dibit ushr 1)
+                Bits.set(lduBody, lduBits++, dibit and 1)
+                if (lduBits == Ldu.BODY_BITS) {
+                    state = State.IDLE
+                    listener(P25Event.Voice(lduNac, Ldu(lduDuid, lduBody)))
+                    lduBody = ByteArray(Ldu.BODY_BITS / 8)
+                }
+            }
             State.SKIP -> if (--skipRemaining <= 0) state = State.IDLE
             State.IDLE -> Unit
         }
@@ -82,11 +100,20 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
                 lastBlockFailed = false
             }
             P25.DUID_LDU1, P25.DUID_LDU2 -> {
-                listener(P25Event.VoiceFrame(result.nac, result.duid))
-                skip(784)
+                state = State.LDU
+                lduDuid = result.duid
+                lduNac = result.nac
+                lduBits = 0
             }
             P25.DUID_HDU -> skip(324)
-            P25.DUID_TDULC -> skip(144)
+            P25.DUID_TDULC -> {
+                listener(P25Event.Terminator(result.nac, result.duid))
+                skip(144)
+            }
+            P25.DUID_TDU -> {
+                listener(P25Event.Terminator(result.nac, result.duid))
+                state = State.IDLE
+            }
             P25.DUID_PDU -> skip(98)
             else -> state = State.IDLE
         }

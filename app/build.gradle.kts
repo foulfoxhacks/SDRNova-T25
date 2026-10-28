@@ -54,3 +54,14 @@ dependencies {
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)
 }
+
+// Optional and local only: compile a JMBE codec jar you built yourself into this APK. Never used for published
+// releases. See docs/VOCODER.md.
+providers.gradleProperty("jmbe.jar").orNull?.let { jars ->
+    dependencies {
+        implementation(files(jars.split(',', ';').map(String::trim).filter(String::isNotEmpty)))
+        implementation("com.github.wendykierp:JTransforms:3.1")
+        implementation("pl.edu.icm:JLargeArrays:1.6")
+        implementation("org.slf4j:slf4j-api:2.0.17")
+    }
+}

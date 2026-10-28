@@ -20,7 +20,14 @@ data class RadioConfig(
     val biasTee: Boolean = false,
     val squelch: Float = 0.8f,
     val aliasText: String = "",
+    val sampleRate: Int = 2_400_000,
+    /** Tuner centre; 0 places it 150 kHz above the channel so the DC spike stays clear. */
+    val centerHz: Long = 0,
+    /** Voice channels decoded alongside the control channel (0 turns following off). */
+    val maxTrafficChannels: Int = 2,
 ) {
+    val effectiveCenterHz: Long get() = if (centerHz > 0) centerHz else frequencyHz + RadioEngine.TUNER_OFFSET_HZ
+
     /** Talkgroup aliases from "id,name" lines; RadioReference CSV rows (Decimal,Hex,Alpha Tag,...) also work. */
     val aliases: Map<Int, String> by lazy {
         aliasText.lineSequence().mapNotNull { line ->
@@ -53,6 +60,9 @@ class ConfigStore(context: Context) {
             biasTee = prefs.getBoolean("biasTee", defaults.biasTee),
             squelch = prefs.getFloat("squelch", defaults.squelch),
             aliasText = prefs.getString("aliases", defaults.aliasText)!!,
+            sampleRate = prefs.getInt("sampleRate", defaults.sampleRate),
+            centerHz = prefs.getLong("center", defaults.centerHz),
+            maxTrafficChannels = prefs.getInt("maxTraffic", defaults.maxTrafficChannels),
         )
     }
 
@@ -68,6 +78,9 @@ class ConfigStore(context: Context) {
             .putBoolean("biasTee", config.biasTee)
             .putFloat("squelch", config.squelch)
             .putString("aliases", config.aliasText)
+            .putInt("sampleRate", config.sampleRate)
+            .putLong("center", config.centerHz)
+            .putInt("maxTraffic", config.maxTrafficChannels)
             .apply()
     }
 }

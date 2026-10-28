@@ -15,7 +15,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import com.sdrnova.t25.voice.VocoderLoader
 import com.sdrnova.t25.radio.ConfigStore
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioService
@@ -30,6 +34,21 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { startWithUsbCheck() }
+
+    private var vocoderName by mutableStateOf<String?>(null)
+
+    private val importVocoder = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        Thread {
+            val provider = runCatching { VocoderLoader.import(this, uri) }.getOrNull()
+            runOnUiThread {
+                vocoderName = provider?.name
+                val message = provider?.let { "Loaded ${it.name}" }
+                    ?: "That file doesn't contain a usable vocoder. See docs/VOCODER.md for how to build one."
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
 
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -48,6 +67,10 @@ class MainActivity : ComponentActivity() {
         ContextCompat.registerReceiver(
             this, usbPermissionReceiver, IntentFilter(ACTION_USB_PERMISSION), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        Thread {
+            val name = VocoderLoader.load(this)?.name
+            runOnUiThread { vocoderName = name }
+        }.start()
         setContent {
             SdrNovaTheme {
                 MainScreen(
@@ -61,6 +84,13 @@ class MainActivity : ComponentActivity() {
                             RadioService.stop(this)
                             Toast.makeText(this, "Saved. Press Start to apply.", Toast.LENGTH_SHORT).show()
                         }
+                    },
+                    vocoderName = vocoderName,
+                    onImportVocoder = { importVocoder.launch(arrayOf("*/*")) },
+                    onRemoveVocoder = {
+                        VocoderLoader.remove(this)
+                        vocoderName = null
+                        Toast.makeText(this, "Vocoder removed. It stays loaded until the app restarts.", Toast.LENGTH_LONG).show()
                     },
                 )
             }

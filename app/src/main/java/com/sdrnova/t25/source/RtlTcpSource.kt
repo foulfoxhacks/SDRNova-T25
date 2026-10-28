@@ -13,8 +13,8 @@ class RtlTcpSource private constructor(
     private val input: DataInputStream,
     private val output: OutputStream,
     override val description: String,
+    override val sampleRate: Int,
 ) : IqSource {
-    override val sampleRate = SAMPLE_RATE
 
     @Volatile
     private var running = false
@@ -77,11 +77,9 @@ class RtlTcpSource private constructor(
     }
 
     companion object {
-        const val SAMPLE_RATE = 960_000
-
         private val TUNERS = arrayOf("unknown", "E4000", "FC0012", "FC0013", "FC2580", "R820T", "R828D")
 
-        fun connect(host: String, port: Int): RtlTcpSource {
+        fun connect(host: String, port: Int, sampleRate: Int): RtlTcpSource {
             val socket = Socket()
             try {
                 socket.connect(InetSocketAddress(host, port), 5_000)
@@ -95,8 +93,9 @@ class RtlTcpSource private constructor(
                 val source = RtlTcpSource(
                     socket, input, socket.getOutputStream(),
                     "rtl_tcp $host:$port (${TUNERS.getOrElse(tuner) { "tuner $tuner" }})",
+                    sampleRate,
                 )
-                source.command(0x02, SAMPLE_RATE)
+                source.command(0x02, sampleRate)
                 return source
             } catch (e: Exception) {
                 socket.close()

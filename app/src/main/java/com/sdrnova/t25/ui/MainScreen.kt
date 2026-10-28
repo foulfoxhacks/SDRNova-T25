@@ -59,13 +59,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sdrnova.t25.radio.EngineStatus
+import com.sdrnova.t25.radio.FollowedCall
 import com.sdrnova.t25.radio.LogLine
+import com.sdrnova.t25.radio.TrunkingView
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioEngine
 import com.sdrnova.t25.radio.SourceType
 import com.sdrnova.t25.receiver.Mode
 import com.sdrnova.t25.source.IqSource
-import com.sdrnova.t25.source.rtlsdr.RtlSdrUsbSource
 import com.sdrnova.t25.trunking.Call
 import com.sdrnova.t25.trunking.SiteInfo
 import com.sdrnova.t25.trunking.TrunkingTracker
@@ -83,6 +84,9 @@ fun MainScreen(
     onStart: (RadioConfig) -> Unit,
     onStop: () -> Unit,
     onSave: (RadioConfig) -> Unit,
+    vocoderName: String?,
+    onImportVocoder: () -> Unit,
+    onRemoveVocoder: () -> Unit,
 ) {
     val status by engine.status.collectAsStateWithLifecycle()
     val trunking by engine.trunking.collectAsStateWithLifecycle()
@@ -130,10 +134,13 @@ fun MainScreen(
                 }
             }
             when (tab) {
-                0 -> CallsTab(trunking.active, trunking.recent, config.aliases, trunking.bands.size, trunking.neighbors.size)
+                0 -> CallsTab(trunking, config.aliases)
                 1 -> LogTab(log)
-                2 -> SpectrumTab(spectrum, config.frequencyHz)
-                else -> SetupTab(config, onChange = { config = it }, onSave = { onSave(config) })
+                2 -> SpectrumTab(spectrum, status.frequencyHz, status.centerHz, status.sampleRate)
+                else -> SetupTab(
+                    config, onChange = { config = it }, onSave = { onSave(config) },
+                    vocoderName = vocoderName, onImportVocoder = onImportVocoder, onRemoveVocoder = onRemoveVocoder,
+                )
             }
         }
     }
@@ -238,17 +245,24 @@ private fun StatRow(vararg stats: Pair<String, String>) {
 }
 
 @Composable
-private fun CallsTab(active: List<Call>, recent: List<Call>, aliases: Map<Int, String>, bands: Int, neighbors: Int) {
+private fun CallsTab(trunking: TrunkingView, aliases: Map<Int, String>) {
+    val active = trunking.active
+    val recent = trunking.recent
     LazyColumn(Modifier.fillMaxSize()) {
-        if (active.isEmpty() && recent.isEmpty()) {
+        if (trunking.following.isEmpty() && active.isEmpty() && recent.isEmpty()) {
             item {
                 Text(
                     "No calls yet. Voice grants from the control channel show up here, with frequencies once the " +
-                        "site has broadcast its band plan ($bands bands, $neighbors neighbor sites heard).",
+                        "site has broadcast its band plan (${trunking.bands.size} bands, " +
+                        "${trunking.neighbors.size} neighbor sites heard).",
                     modifier = Modifier.padding(20.dp),
                     color = Muted,
                 )
             }
+        }
+        if (trunking.following.isNotEmpty()) {
+            item { SectionHeader("Decoding now") }
+            items(trunking.following, key = { "f${it.id}" }) { FollowedRow(it, aliases) }
         }
         if (active.isNotEmpty()) {
             item { SectionHeader("Active") }
@@ -257,6 +271,42 @@ private fun CallsTab(active: List<Call>, recent: List<Call>, aliases: Map<Int, S
         if (recent.isNotEmpty()) {
             item { SectionHeader("Recent") }
             items(recent) { CallRow(it, aliases, live = false) }
+        }
+    }
+}
+
+@Composable
+private fun FollowedRow(call: FollowedCall, aliases: Map<Int, String>) {
+    val alias = if (call.unitToUnit) null else aliases[call.talkgroup]
+    val title = alias ?: if (call.unitToUnit) "Private ${call.talkgroup}" else "TG ${call.talkgroup}"
+    val details = buildList {
+        if (alias != null) add("TG ${call.talkgroup}")
+        add(TrunkingTracker.mhz(call.frequencyHz))
+        call.source?.let { add("from $it") }
+    }.joinToString(" · ")
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(10.dp).background(if (call.playing) Good else Amber, CircleShape))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(details, style = MaterialTheme.typography.bodySmall, color = Muted)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                "${call.voiceFrames / 50}s",
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                color = Good,
+            )
+            when {
+                call.encrypted -> Flag("ENC", Amber)
+                call.playing -> Flag("AUDIO", Good)
+            }
         }
     }
 }
@@ -344,21 +394,21 @@ private fun LogTab(log: List<LogLine>) {
 }
 
 @Composable
-private fun SpectrumTab(spectrum: FloatArray?, channelHz: Long) {
-    if (spectrum == null) {
+private fun SpectrumTab(spectrum: FloatArray?, channelHz: Long, centerHz: Long, sampleRate: Int) {
+    if (spectrum == null || sampleRate == 0) {
         Text("Start the radio to see the spectrum around the channel.", modifier = Modifier.padding(20.dp), color = Muted)
     } else {
-        SpectrumPlot(spectrum, channelHz)
+        SpectrumPlot(spectrum, channelHz, centerHz, sampleRate)
     }
 }
 
 @Composable
-private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long) {
+private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long, centerHz: Long, sampleRate: Int) {
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         val sorted = spectrum.sorted()
         val floor = sorted[sorted.size / 10] - 6f
         val top = maxOf(sorted.last() + 6f, floor + 30f)
-        val channelFraction = 0.5f - RadioEngine.TUNER_OFFSET_HZ.toFloat() / RtlSdrUsbSource.SAMPLE_RATE
+        val channelFraction = 0.5f + (channelHz - centerHz).toFloat() / sampleRate
         val lineColor = MaterialTheme.colorScheme.primary
         Canvas(
             Modifier.fillMaxWidth().weight(1f)
@@ -381,8 +431,8 @@ private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long) {
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "Amber: ${TrunkingTracker.mhz(channelHz)}. Grey: tuner centre (DC spike). Span 960 kHz, " +
-                "%.0f to %.0f dBFS.".format(floor, top),
+            "Amber: ${TrunkingTracker.mhz(channelHz)}. Grey: tuner centre (DC spike). " +
+                "Span %.2f MHz, %.0f to %.0f dBFS.".format(sampleRate / 1e6, floor, top),
             style = MaterialTheme.typography.bodySmall,
             color = Muted,
         )
@@ -390,8 +440,16 @@ private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long) {
 }
 
 @Composable
-private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSave: () -> Unit) {
+private fun SetupTab(
+    config: RadioConfig,
+    onChange: (RadioConfig) -> Unit,
+    onSave: () -> Unit,
+    vocoderName: String?,
+    onImportVocoder: () -> Unit,
+    onRemoveVocoder: () -> Unit,
+) {
     var frequencyText by remember { mutableStateOf("%.5f".format(config.frequencyHz / 1e6)) }
+    var centerText by remember { mutableStateOf(if (config.centerHz > 0) "%.5f".format(config.centerHz / 1e6) else "") }
     var portText by remember { mutableStateOf(config.port.toString()) }
     var ppmText by remember { mutableStateOf(config.ppm.toString()) }
 
@@ -447,6 +505,48 @@ private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSav
             }
         }
 
+        Label("Sample rate (wider follows more voice channels, costs more CPU)")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            IqSource.RTL_SAMPLE_RATES.forEach { rate ->
+                FilterChip(
+                    selected = config.sampleRate == rate,
+                    onClick = { onChange(config.copy(sampleRate = rate)) },
+                    label = { Text("%.2f MS/s".format(rate / 1e6)) },
+                )
+            }
+        }
+
+        OutlinedTextField(
+            value = centerText,
+            onValueChange = { text ->
+                centerText = text
+                if (text.isBlank()) {
+                    onChange(config.copy(centerHz = 0))
+                } else {
+                    text.toDoubleOrNull()?.takeIf { it in 24.0..1766.0 }
+                        ?.let { onChange(config.copy(centerHz = (it * 1e6).roundToInt().toLong())) }
+                }
+            },
+            label = { Text("Tuner centre (MHz), blank for automatic") },
+            supportingText = {
+                Text(
+                    "Voice channels within ±%.0f kHz of the centre can be followed."
+                        .format(config.sampleRate * 0.42 / 1000),
+                )
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Label("Voice channels decoded at once: " + if (config.maxTrafficChannels == 0) "off" else config.maxTrafficChannels.toString())
+        Slider(
+            value = config.maxTrafficChannels.toFloat(),
+            onValueChange = { onChange(config.copy(maxTrafficChannels = it.roundToInt())) },
+            valueRange = 0f..4f,
+            steps = 3,
+        )
+
         val gainIndex = if (config.gainTenthsDb == IqSource.AUTO_GAIN) -1 else
             IqSource.GAIN_STEPS.indexOfFirst { it >= config.gainTenthsDb }.let { if (it < 0) IqSource.GAIN_STEPS.lastIndex else it }
         Label("Tuner gain: " + if (gainIndex < 0) "automatic" else "%.1f dB".format(IqSource.GAIN_STEPS[gainIndex] / 10.0))
@@ -491,6 +591,19 @@ private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSav
             minLines = 4,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        Label("Voice codec (IMBE)")
+        Text(
+            vocoderName?.let { "Installed: $it" }
+                ?: "None installed. SDRNova T25 ships without a vocoder, so P25 calls are followed and logged " +
+                "without audio. Import a provider jar you built yourself; see docs/VOCODER.md in the repository.",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (vocoderName != null) Good else Muted,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onImportVocoder) { Text("Import provider jar") }
+            if (vocoderName != null) Button(onClick = onRemoveVocoder) { Text("Remove") }
+        }
 
         Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         Text(

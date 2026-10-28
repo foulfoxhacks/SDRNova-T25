@@ -4,6 +4,7 @@ import com.sdrnova.t25.dsp.ComplexFirDecimator
 import com.sdrnova.t25.dsp.FirDesign
 import com.sdrnova.t25.dsp.Mixer
 import com.sdrnova.t25.dsp.RealFir
+import com.sdrnova.t25.dsp.SampleFormat
 import com.sdrnova.t25.p25.C4fmDemodulator
 import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.p25.P25P1Framer
@@ -18,9 +19,9 @@ enum class Mode(val label: String) {
 }
 
 /**
- * Everything between raw RTL-SDR bytes and decoded output for one narrowband channel: mix the channel down to DC,
- * decimate to 48 kHz in stages, channel-filter, then demodulate. The tuner sits a little off the channel so the
- * dongle's DC spike stays out of the passband; [channelOffsetHz] says where the channel is relative to the tuner.
+ * Everything between tuner samples and decoded output for one narrowband channel: mix the channel down to DC,
+ * decimate to the channel rate (48 or 50 kHz) in stages, channel-filter, then demodulate. Several receivers can
+ * share one tuner; [channelOffsetHz] says where this channel is relative to the tuner centre.
  */
 class ChannelReceiver(
     val inputRate: Int,
@@ -32,13 +33,15 @@ class ChannelReceiver(
         fun onAudio(samples: ShortArray, count: Int) {}
     }
 
+    val channelRate: Int = channelRateFor(inputRate)
     private val mixer = Mixer(inputRate.toDouble())
     private val stages: List<ComplexFirDecimator>
     private val channelFilter: ComplexFirDecimator
     private val framer = P25P1Framer(::onFramerEvent)
-    private val demodulator = C4fmDemodulator(CHANNEL_RATE.toDouble(), framer)
-    private val nbfm = NbfmDemodulator(CHANNEL_RATE)
+    private val demodulator = C4fmDemodulator(channelRate.toDouble(), framer)
+    private val nbfm = NbfmDemodulator(channelRate)
     private var work = FloatArray(0)
+    private var converted = FloatArray(0)
     private var audio = ShortArray(0)
     private var powerAverage = 1e-9
 
@@ -67,17 +70,7 @@ class ChannelReceiver(
         }
 
     init {
-        val total = inputRate / CHANNEL_RATE
-        require(total * CHANNEL_RATE == inputRate) { "input rate must be a multiple of $CHANNEL_RATE" }
-        val factors = ArrayList<Int>()
-        var remaining = total
-        for (factor in intArrayOf(5, 4, 3, 2)) {
-            while (remaining % factor == 0 && remaining > 1) {
-                factors += factor
-                remaining /= factor
-            }
-        }
-        require(remaining == 1) { "input rate $inputRate does not decimate to $CHANNEL_RATE" }
+        val factors = decimationFactors(inputRate / channelRate)!!
         var rate = inputRate.toDouble()
         stages = factors.map { factor ->
             val outRate = rate / factor
@@ -89,15 +82,21 @@ class ChannelReceiver(
             Mode.P25_PHASE1 -> 5_200.0 to 6_500.0
             Mode.NBFM -> 6_000.0 to 8_500.0
         }
-        channelFilter = ComplexFirDecimator(FirDesign.lowPass(CHANNEL_RATE.toDouble(), pass, stop, 60.0), 1)
+        channelFilter = ComplexFirDecimator(FirDesign.lowPass(channelRate.toDouble(), pass, stop, 60.0), 1)
         updateMixer()
     }
 
-    /** Processes [length] bytes of unsigned 8-bit interleaved I/Q. */
+    /** Processes [length] bytes of unsigned 8-bit interleaved I/Q (RTL-SDR format). */
     fun process(bytes: ByteArray, length: Int) {
-        val samples = length / 2
+        if (converted.size < length) converted = FloatArray(length)
+        process(converted, SampleFormat.UNSIGNED_8.toFloat(bytes, length, converted))
+    }
+
+    /** Processes [samples] complex samples of interleaved float I/Q straight from the tuner. [iq] is not modified. */
+    fun process(iq: FloatArray, samples: Int) {
         if (work.size < samples * 2) work = FloatArray(samples * 2)
-        var count = mixer.mixBytes(bytes, length, work)
+        mixer.mix(iq, samples, work)
+        var count = samples
         for (stage in stages) count = stage.process(work, count, work)
         count = channelFilter.process(work, count, work)
         if (count == 0) return
@@ -130,9 +129,30 @@ class ChannelReceiver(
     }
 
     companion object {
-        const val CHANNEL_RATE = 48_000
         private const val STAGE_PASS_HZ = 8_000.0
         private const val AFC_LIMIT_HZ = 6_000.0
+
+        /** 48 kHz suits RTL-SDR and HackRF rates; 50 kHz suits Airspy's 2.5/3/6/10 MS/s. */
+        private val CHANNEL_RATES = intArrayOf(48_000, 50_000)
+
+        fun isSupportedRate(inputRate: Int): Boolean = CHANNEL_RATES.any { decimationFactors(inputRate / it, inputRate % it) != null }
+
+        fun channelRateFor(inputRate: Int): Int = CHANNEL_RATES.firstOrNull { decimationFactors(inputRate / it, inputRate % it) != null }
+            ?: throw IllegalArgumentException("sample rate $inputRate doesn't decimate to 48 or 50 kHz")
+
+        /** Splits a decimation into stages of 5, 4, 3 and 2; null if it can't be. */
+        private fun decimationFactors(total: Int, remainder: Int = 0): List<Int>? {
+            if (remainder != 0 || total < 1) return null
+            val factors = ArrayList<Int>()
+            var remaining = total
+            for (factor in intArrayOf(5, 4, 3, 2)) {
+                while (remaining % factor == 0 && remaining > 1) {
+                    factors += factor
+                    remaining /= factor
+                }
+            }
+            return if (remaining == 1) factors else null
+        }
     }
 }
 

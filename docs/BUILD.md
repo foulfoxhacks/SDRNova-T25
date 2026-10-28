@@ -38,16 +38,19 @@ output somewhere short:
 
 ## What works in this build
 
-- RTL-SDR over USB OTG (R820T, R820T2, R828D including RTL-SDR Blog V4), or any `rtl_tcp` server
+- RTL-SDR over USB OTG (R820T, R820T2, R828D including RTL-SDR Blog V4), or any `rtl_tcp` server, at 0.96, 1.92 or 2.4 MS/s
 - P25 Phase 1 control channel: sync, NID, TSBK decode with CRC, band plan, site identity, voice grants and grant updates resolved to frequencies, active and recent calls, talkgroup aliases
+- Traffic channel following: up to four voice channels decoded alongside the control channel, as long as they sit inside the tuner's bandwidth (like sdrtrunk with a single tuner)
+- LDU1/LDU2 decoding: IMBE voice frames, link control (talkgroup and radio ID, Hamming(10,6) + Reed-Solomon(24,12,13)), encryption sync (algorithm and key ID, Reed-Solomon(24,16,9)); TDU/TDULC end calls
+- Voice audio through an IMBE `VocoderProvider` you supply; see [VOCODER.md](VOCODER.md)
 - Analog NBFM with noise squelch and audio
-- Spectrum view of the 960 kHz around the tuner
+- Spectrum view of the tuner bandwidth
 
 ## Not yet
 
-- Voice audio for P25: needs a `VocoderProvider` (IMBE), which this repository does not bundle
-- Following voice grants onto traffic channels (one tuner, one channel for now)
-- LDU/HDU link control, PDU/AMBTC, Phase 2, DMR and the rest of the README feature target
+- HDU decoding and TDULC link control (both are only used as call boundaries for now)
+- PDU/AMBTC multi-block control messages
+- Phase 2 TDMA and DMR
 - E4000, FC0012/13 and FC2580 tuners; Airspy and HackRF
 
 ## Credits

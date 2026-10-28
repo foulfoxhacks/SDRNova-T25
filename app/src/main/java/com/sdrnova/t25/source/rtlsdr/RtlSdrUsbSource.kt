@@ -21,8 +21,8 @@ class RtlSdrUsbSource private constructor(
     private val rtl: Rtl2832,
     private val tuner: R82xxTuner,
     override val description: String,
+    override val sampleRate: Int,
 ) : IqSource {
-    override val sampleRate = SAMPLE_RATE
 
     private val lock = Any()
     private var requestedHz = 0L
@@ -118,8 +118,6 @@ class RtlSdrUsbSource private constructor(
     }
 
     companion object {
-        /** 20x the 48 kHz channel rate, and low enough to keep a phone's CPU comfortable. */
-        const val SAMPLE_RATE = 960_000
         private const val BUFFER_SIZE = 16_384
         private const val REQUEST_COUNT = 12
 
@@ -136,7 +134,7 @@ class RtlSdrUsbSource private constructor(
             context.getSystemService(UsbManager::class.java).deviceList.values.firstOrNull(::isRtlSdr)
 
         /** Opens and initializes the dongle. The app must already hold USB permission for [device]. */
-        fun open(context: Context, device: UsbDevice): RtlSdrUsbSource {
+        fun open(context: Context, device: UsbDevice, sampleRate: Int): RtlSdrUsbSource {
             val manager = context.getSystemService(UsbManager::class.java)
             val connection = manager.openDevice(device) ?: throw IOException("Android refused to open the USB device")
             try {
@@ -160,10 +158,10 @@ class RtlSdrUsbSource private constructor(
                 } finally {
                     rtl.setI2cRepeater(false)
                 }
-                rtl.setSampleRate(SAMPLE_RATE)
+                rtl.setSampleRate(sampleRate)
                 val name = runCatching { device.productName }.getOrNull() ?: "RTL-SDR"
                 val label = if (blogV4) "RTL-SDR Blog V4" else name
-                return RtlSdrUsbSource(connection, usbInterface, endpoint, rtl, tuner, "$label (${type.label})")
+                return RtlSdrUsbSource(connection, usbInterface, endpoint, rtl, tuner, "$label (${type.label})", sampleRate)
             } catch (e: Exception) {
                 connection.close()
                 throw e

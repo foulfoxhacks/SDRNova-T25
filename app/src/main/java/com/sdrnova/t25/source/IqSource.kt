@@ -1,9 +1,12 @@
 package com.sdrnova.t25.source
 
-/** A stream of unsigned 8-bit interleaved I/Q, like an RTL-SDR produces. */
+import com.sdrnova.t25.dsp.SampleFormat
+
+/** A stream of raw interleaved I/Q from a tuner. */
 interface IqSource : AutoCloseable {
     val description: String
     val sampleRate: Int
+    val format: SampleFormat get() = SampleFormat.UNSIGNED_8
 
     fun setCenterFrequency(hz: Long)
 
@@ -22,6 +25,9 @@ interface IqSource : AutoCloseable {
 
     companion object {
         const val AUTO_GAIN = -1
+
+        /** RTL-SDR rates that decimate cleanly to the 48 kHz channel rate. */
+        val RTL_SAMPLE_RATES = intArrayOf(960_000, 1_920_000, 2_400_000)
 
         /** R820T gain steps in tenths of a dB, the values sdrtrunk and rtl_tcp both use. */
         val GAIN_STEPS = intArrayOf(

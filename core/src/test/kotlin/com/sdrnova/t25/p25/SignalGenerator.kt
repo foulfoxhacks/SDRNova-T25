@@ -43,12 +43,21 @@ object SignalGenerator {
     private const val SPS = 10
 
     /** One TSDU frame in transmit order: sync, NID, TSBKs, with a status dibit after every 35 dibits. */
-    fun tsduFrame(nac: Int, blocks: List<ByteArray>): IntArray {
+    fun tsduFrame(nac: Int, blocks: List<ByteArray>): IntArray =
+        frame(nac, P25.DUID_TSDU, blocks.flatMap { Trellis12.encode(it).toList() })
+
+    /** An LDU1/LDU2 frame carrying [body] (see [Ldu.encode]). */
+    fun lduFrame(nac: Int, duid: Int, body: ByteArray): IntArray =
+        frame(nac, duid, List(Ldu.BODY_BITS / 2) { (Bits.get(body, 2 * it) shl 1) or Bits.get(body, 2 * it + 1) })
+
+    fun tduFrame(nac: Int): IntArray = frame(nac, P25.DUID_TDU, List(14) { 0 })
+
+    private fun frame(nac: Int, duid: Int, data: List<Int>): IntArray {
         val payload = ArrayList<Int>()
         P25.SYNC_DIBITS.forEach { payload += it }
-        val nid = Bch63.encode(nac, P25.DUID_TSDU) shl 1
+        val nid = Bch63.encode(nac, duid) shl 1
         for (i in 0 until 32) payload += ((nid ushr (62 - 2 * i)) and 3L).toInt()
-        blocks.forEach { block -> Trellis12.encode(block).forEach { payload += it } }
+        payload += data
         val out = ArrayList<Int>()
         var index = 0
         var source = 0
@@ -74,7 +83,10 @@ object SignalGenerator {
         snrDb: Double,
         random: Random,
         amplitude: Double = 0.25,
-    ): ByteArray {
+    ): ByteArray = toIq(deviation(dibits), outputRate, carrierHz, snrDb, random, amplitude)
+
+    /** C4FM frequency deviation in Hz, sampled at 48 kHz. */
+    fun deviation(dibits: IntArray): DoubleArray {
         val filter = transmitFilter()
         val deviation = DoubleArray(dibits.size * SPS + filter.size)
         for ((k, dibit) in dibits.withIndex()) {
@@ -86,7 +98,7 @@ object SignalGenerator {
             }
             for (t in filter.indices) deviation[k * SPS + t] += hz * filter[t]
         }
-        return toIq(deviation, outputRate, carrierHz, snrDb, random, amplitude)
+        return deviation
     }
 
     /** Frequency-modulates a baseband deviation signal (Hz at 48 kHz) onto a carrier, adds noise, quantizes to u8. */
@@ -97,12 +109,13 @@ object SignalGenerator {
         snrDb: Double,
         random: Random,
         amplitude: Double = 0.25,
-    ): ByteArray {
+    ): ByteArray = combine(listOf(carrier(deviation, outputRate, carrierHz, amplitude)), outputRate, snrDb, amplitude, random)
+
+    /** A clean FM carrier as interleaved float I/Q at [outputRate]. */
+    fun carrier(deviation: DoubleArray, outputRate: Int, carrierHz: Double, amplitude: Double = 0.25): FloatArray {
         val ratio = outputRate / BASE_RATE
         val count = (deviation.size - 1) * ratio
-        // SNR is measured in a 12.5 kHz channel; the noise itself spreads across the whole sample rate.
-        val sigma = sqrt(amplitude * amplitude / (2 * 10.0.pow(snrDb / 10) * (12_500.0 / outputRate)))
-        val out = ByteArray(count * 2)
+        val out = FloatArray(count * 2)
         var phase = 0.0
         for (n in 0 until count) {
             val t = n.toDouble() / ratio
@@ -110,10 +123,24 @@ object SignalGenerator {
             val hz = deviation[whole] + (deviation[whole + 1] - deviation[whole]) * (t - whole)
             phase += 2 * PI * (hz + carrierHz) / outputRate
             if (phase > PI) phase -= 2 * PI else if (phase < -PI) phase += 2 * PI
-            out[2 * n] = quantize(amplitude * cos(phase) + sigma * random.nextGaussian())
-            out[2 * n + 1] = quantize(amplitude * sin(phase) + sigma * random.nextGaussian())
+            out[2 * n] = (amplitude * cos(phase)).toFloat()
+            out[2 * n + 1] = (amplitude * sin(phase)).toFloat()
         }
         return out
+    }
+
+    /**
+     * Sums carriers, adds noise for [snrDb] per carrier of [amplitude] in a 12.5 kHz channel (the noise itself
+     * spreads across the whole sample rate), and quantizes to u8 like an RTL-SDR.
+     */
+    fun combine(signals: List<FloatArray>, outputRate: Int, snrDb: Double, amplitude: Double, random: Random): ByteArray {
+        val length = signals.maxOf { it.size }
+        val sigma = sqrt(amplitude * amplitude / (2 * 10.0.pow(snrDb / 10) * (12_500.0 / outputRate)))
+        return ByteArray(length) { k ->
+            var value = sigma * random.nextGaussian()
+            for (signal in signals) if (k < signal.size) value += signal[k]
+            quantize(value)
+        }
     }
 
     fun noise(samples: Int, random: Random, sigma: Double = 0.05): ByteArray =

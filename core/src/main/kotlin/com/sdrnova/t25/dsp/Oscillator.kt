@@ -5,9 +5,35 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+/** Raw sample layouts produced by the supported radios. */
+enum class SampleFormat(val bytesPerSample: Int) {
+    /** RTL-SDR: unsigned 8-bit I/Q. */
+    UNSIGNED_8(2),
+
+    /** HackRF: signed 8-bit I/Q. */
+    SIGNED_8(2),
+
+    /** Little-endian signed 16-bit I/Q. */
+    SIGNED_16(4);
+
+    /** Converts [length] bytes of interleaved I/Q into floats in [out]; returns the complex sample count. */
+    fun toFloat(bytes: ByteArray, length: Int, out: FloatArray): Int {
+        val count = length / bytesPerSample
+        when (this) {
+            UNSIGNED_8 -> for (k in 0 until count * 2) out[k] = ((bytes[k].toInt() and 0xFF) - 127.5f) * (1f / 127.5f)
+            SIGNED_8 -> for (k in 0 until count * 2) out[k] = bytes[k] * (1f / 128f)
+            SIGNED_16 -> for (k in 0 until count * 2) {
+                val value = (bytes[2 * k].toInt() and 0xFF) or (bytes[2 * k + 1].toInt() shl 8)
+                out[k] = value * (1f / 32768f)
+            }
+        }
+        return count
+    }
+}
+
 /**
- * Converts RTL-SDR unsigned 8-bit I/Q to floats and frequency-shifts it in one pass. The oscillator is a rotating
- * unit phasor, renormalized periodically so rounding error never grows its amplitude.
+ * Frequency-shifts interleaved I/Q. The oscillator is a rotating unit phasor, renormalized periodically so rounding
+ * error never grows its amplitude.
  */
 class Mixer(private val sampleRate: Double) {
     private var stepI = 1f
@@ -24,14 +50,13 @@ class Mixer(private val sampleRate: Double) {
             stepQ = sin(radians).toFloat()
         }
 
-    /** Writes [length] bytes of interleaved u8 I/Q from [bytes] as shifted floats into [out]; returns sample count. */
-    fun mixBytes(bytes: ByteArray, length: Int, out: FloatArray): Int {
-        val count = length / 2
+    /** Shifts [count] complex samples from [input] into [out]. */
+    fun mix(input: FloatArray, count: Int, out: FloatArray) {
         var pI = phasorI
         var pQ = phasorQ
         for (k in 0 until count) {
-            val i = ((bytes[2 * k].toInt() and 0xFF) - 127.5f) * SCALE
-            val q = ((bytes[2 * k + 1].toInt() and 0xFF) - 127.5f) * SCALE
+            val i = input[2 * k]
+            val q = input[2 * k + 1]
             out[2 * k] = i * pI - q * pQ
             out[2 * k + 1] = i * pQ + q * pI
             val nextI = pI * stepI - pQ * stepQ
@@ -46,10 +71,5 @@ class Mixer(private val sampleRate: Double) {
         }
         phasorI = pI
         phasorQ = pQ
-        return count
-    }
-
-    private companion object {
-        const val SCALE = 1f / 127.5f
     }
 }

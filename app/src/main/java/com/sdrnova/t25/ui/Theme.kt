@@ -5,23 +5,51 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-val Teal = Color(0xFF4FD1C5)
-val Amber = Color(0xFFF6AD55)
-val Alert = Color(0xFFFC5C65)
-val Good = Color(0xFF48BB78)
-val Muted = Color(0xFF8A94A6)
+/** Scanner-display palette: black canvas, blue-grey panels, one cyan accent, and colours that mean something. */
+val Canvas = Color(0xFF000000)
+val Panel = Color(0xFF1B262C)
+val PanelDeep = Color(0xFF0E1519)
+val CardSurface = Color(0xFF141C21)
+val Hairline = Color(0xFF20282D)
+val Outline = Color(0xFF37474F)
+val Ink = Color(0xFFECEFF1)
+val Muted = Color(0xFF8A9399)
+
+val Cyan = Color(0xFF26C6DA)
+val SkyBlue = Color(0xFF42A5F5)
+val Teal = Color(0xFF26A69A)
+val Violet = Color(0xFFAB47BC)
+
+/** Running, locked, audio playing. */
+val Good = Color(0xFF4CAF50)
+val GoodText = Color(0xFF81C784)
+
+/** Searching, held, encrypted. */
+val Amber = Color(0xFFFFA726)
+
+/** Errors and emergencies. */
+val Alert = Color(0xFFEF5350)
 
 private val colors = darkColorScheme(
-    primary = Teal,
-    onPrimary = Color(0xFF00201D),
-    secondary = Amber,
-    onSecondary = Color(0xFF2B1700),
-    background = Color(0xFF0E1116),
-    onBackground = Color(0xFFE6EAF0),
-    surface = Color(0xFF151A21),
-    onSurface = Color(0xFFE6EAF0),
-    surfaceVariant = Color(0xFF1E252E),
-    onSurfaceVariant = Color(0xFFB4BDCA),
+    primary = Cyan,
+    onPrimary = Color(0xFF00363D),
+    primaryContainer = Color(0xFF004F58),
+    onPrimaryContainer = Color(0xFFB2EBF2),
+    secondary = SkyBlue,
+    onSecondary = Color(0xFF002F5C),
+    secondaryContainer = Color(0xFF16303F),
+    onSecondaryContainer = Color(0xFFCFE6F7),
+    background = Canvas,
+    onBackground = Ink,
+    surface = Panel,
+    onSurface = Ink,
+    surfaceVariant = CardSurface,
+    onSurfaceVariant = Color(0xFFB0BEC5),
+    surfaceContainer = Panel,
+    surfaceContainerHigh = Color(0xFF223038),
+    surfaceContainerHighest = Color(0xFF2A3942),
+    outline = Outline,
+    outlineVariant = Hairline,
     error = Alert,
 )
 

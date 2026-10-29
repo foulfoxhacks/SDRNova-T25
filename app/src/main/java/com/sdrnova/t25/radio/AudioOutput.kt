@@ -7,7 +7,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /** Plays 48 kHz mono PCM on its own thread so a slow audio device never stalls the DSP thread. */
-class AudioOutput(private val sampleRate: Int = 48_000) {
+class AudioOutput(val sampleRate: Int = 48_000) {
     private val queue = ArrayBlockingQueue<ShortArray>(32)
     private var track: AudioTrack? = null
     private var thread: Thread? = null

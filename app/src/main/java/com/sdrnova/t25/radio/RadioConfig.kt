@@ -27,8 +27,20 @@ data class RadioConfig(
     val maxTrafficChannels: Int = 2,
     /** Speaker volume in dB; [AudioOutput.MUTE_DB] or below is mute. */
     val volumeDb: Float = 0f,
+    /** The playlist channel picked in Channels; blank when tuned by hand. */
+    val channelName: String = "",
+    /** Playlist alias list for names and priorities; blank uses every alias. */
+    val aliasList: String = "",
+    /** Scan the ticked playlist channels instead of sitting on one frequency. */
+    val scan: Boolean = false,
+    /** How long scanning listens to a quiet channel. */
+    val scanDwellMs: Int = 500,
+    /** How long scanning waits on a channel after its call ends, for the reply. */
+    val scanHangMs: Int = 2_000,
 ) {
     val effectiveCenterHz: Long get() = if (centerHz > 0) centerHz else frequencyHz + RadioEngine.TUNER_OFFSET_HZ
+
+    val tuning: Tuning get() = Tuning(frequencyHz, mode, channelName, aliasList.ifEmpty { null })
 
     /** Talkgroup aliases from "id,name" lines; RadioReference CSV rows (Decimal,Hex,Alpha Tag,...) also work. */
     val aliases: Map<Int, String> by lazy {
@@ -66,6 +78,11 @@ class ConfigStore(context: Context) {
             centerHz = prefs.getLong("center", defaults.centerHz),
             maxTrafficChannels = prefs.getInt("maxTraffic", defaults.maxTrafficChannels),
             volumeDb = prefs.getFloat("volumeDb", defaults.volumeDb),
+            channelName = prefs.getString("channelName", defaults.channelName)!!,
+            aliasList = prefs.getString("aliasList", defaults.aliasList)!!,
+            scan = prefs.getBoolean("scan", defaults.scan),
+            scanDwellMs = prefs.getInt("scanDwellMs", defaults.scanDwellMs),
+            scanHangMs = prefs.getInt("scanHangMs", defaults.scanHangMs),
         )
     }
 
@@ -85,6 +102,11 @@ class ConfigStore(context: Context) {
             .putLong("center", config.centerHz)
             .putInt("maxTraffic", config.maxTrafficChannels)
             .putFloat("volumeDb", config.volumeDb)
+            .putString("channelName", config.channelName)
+            .putString("aliasList", config.aliasList)
+            .putBoolean("scan", config.scan)
+            .putInt("scanDwellMs", config.scanDwellMs)
+            .putInt("scanHangMs", config.scanHangMs)
             .apply()
     }
 }

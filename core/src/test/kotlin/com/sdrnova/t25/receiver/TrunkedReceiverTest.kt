@@ -117,6 +117,63 @@ class TrunkedReceiverTest {
     }
 
     @Test
+    fun `plays a conventional P25 call on the main channel`() {
+        val random = Random(5)
+        val frames = List(9) { ByteArray(18).also(random::nextBytes) }
+        val dibits = ArrayList<Int>()
+        repeat(600) { dibits += random.nextInt(4) }
+        repeat(3) {
+            val lc = Ldu.linkControlWords(groupVoiceUser(4321, 99))
+            val es = Ldu.encryptionWords(EncryptionSync(EncryptionSync.CLEAR, 0, 0))
+            SignalGenerator.lduFrame(nac, P25.DUID_LDU1, Ldu.encode(P25.DUID_LDU1, frames, lc)).forEach { dibits += it }
+            SignalGenerator.lduFrame(nac, P25.DUID_LDU2, Ldu.encode(P25.DUID_LDU2, frames, es)).forEach { dibits += it }
+        }
+        SignalGenerator.tduFrame(nac).forEach { dibits += it }
+        repeat(300) { dibits += 0 }
+        val iq = SignalGenerator.combine(
+            listOf(SignalGenerator.carrier(SignalGenerator.deviation(dibits.toIntArray()), rate, (controlHz - centerHz) + 200.0)),
+            rate, snrDb = 18.0, amplitude = 0.25, random = random,
+        )
+
+        val started = ArrayList<TrunkedReceiver.TrafficChannel>()
+        val ended = ArrayList<String>()
+        var voice = 0
+        var busyDuringCall = false
+        lateinit var receiver: TrunkedReceiver
+        receiver = TrunkedReceiver(rate, centerHz, controlHz, Mode.P25_PHASE1, maxTrafficChannels = 0,
+            listener = object : TrunkedReceiver.Listener {
+                override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
+                    started += channel
+                }
+
+                override fun onTrafficVoice(channel: TrunkedReceiver.TrafficChannel, ldu: Ldu) {
+                    voice++
+                    busyDuringCall = busyDuringCall || receiver.busy
+                }
+
+                override fun onTrafficEnd(channel: TrunkedReceiver.TrafficChannel, reason: String) {
+                    ended += reason
+                }
+            })
+        val floats = FloatArray(32_768)
+        var offset = 0
+        while (offset < iq.size) {
+            val length = minOf(32_768, iq.size - offset)
+            val count = SampleFormat.UNSIGNED_8.toFloat(iq.copyOfRange(offset, offset + length), length, floats)
+            receiver.process(floats, count)
+            offset += length
+        }
+
+        assertEquals(1, started.size)
+        assertEquals(controlHz, started[0].frequencyHz)
+        assertEquals(4321, started[0].talkgroup)
+        assertTrue(voice >= 5, "decoded $voice of 6 LDUs")
+        assertTrue(busyDuringCall)
+        assertEquals(listOf("end of transmission"), ended)
+        assertEquals(false, receiver.busy)
+    }
+
+    @Test
     fun `follows a Phase 2 grant onto its TDMA timeslot`() {
         val random = Random(31)
         // Band 2: 2-slot TDMA (channel type 3), 851 MHz base, 12.5 kHz carriers. Channel 41 is carrier 20, slot 2.

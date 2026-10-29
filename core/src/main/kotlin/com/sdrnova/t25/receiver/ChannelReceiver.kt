@@ -97,6 +97,9 @@ class ChannelReceiver(
 
     val nac: Int get() = framer.nac
 
+    /** NBFM only: whether the squelch is passing audio. */
+    val squelchOpen: Boolean get() = nbfm.squelchOpen
+
     var squelchThreshold: Float
         get() = nbfm.squelchThreshold
         set(value) {

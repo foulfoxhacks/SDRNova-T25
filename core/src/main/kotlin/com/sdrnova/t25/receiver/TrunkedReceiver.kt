@@ -95,11 +95,13 @@ class TrunkedReceiver(
         controlHz = hz
         control.channelOffsetHz = (hz - centerHz).toDouble()
         for (channel in dmrCalls.values.toList()) release(channel, "retuned")
+        conventional?.let { release(it, "retuned") }
         return true
     }
     private val traffic = ArrayList<TrafficChannel>()
     private val carriers = HashMap<Long, Carrier>()
     private val dmrCalls = HashMap<Int, TrafficChannel>()
+    private var conventional: TrafficChannel? = null
     private val notices = HashMap<String, Long>()
     private val cooldownUntil = HashMap<Long, Long>()
     private var samplesProcessed = 0L
@@ -111,6 +113,9 @@ class TrunkedReceiver(
     val streamTimeMs: Long get() = samplesProcessed * 1000 / inputRate
 
     val trafficChannels: List<TrafficChannel> get() = traffic.toList()
+
+    /** A call is up, or (NBFM) the squelch is open: what scanning waits on. */
+    val busy: Boolean get() = traffic.isNotEmpty() || (mode == Mode.NBFM && control.squelchOpen)
 
     init {
         control = ChannelReceiver(inputRate, mode, object : ChannelReceiver.Listener {
@@ -125,7 +130,7 @@ class TrunkedReceiver(
     fun process(iq: FloatArray, samples: Int) {
         control.process(iq, samples)
         for (channel in traffic.toTypedArray()) {
-            if (channel.timeslot == null && channel in traffic) channel.receiver.process(iq, samples)
+            if (channel.timeslot == null && channel.receiver !== control && channel in traffic) channel.receiver.process(iq, samples)
         }
         for ((frequency, carrier) in carriers.entries.toTypedArray()) {
             if (carriers[frequency] === carrier) carrier.receiver.process(iq, samples)
@@ -137,12 +142,36 @@ class TrunkedReceiver(
         }
     }
 
+    /** Ends every call, as when the radio moves elsewhere. */
+    fun releaseAll(reason: String) {
+        for (channel in traffic.toList()) release(channel, reason)
+    }
+
     private fun onControl(event: P25Event) {
         listener.onControlEvent(event)
-        if (event is P25Event.Message) {
-            listener.onLog(tracker.onMessage(event.message))
-            if (maxTrafficChannels > 0) follow(event.message)
+        when (event) {
+            is P25Event.Message -> {
+                listener.onLog(tracker.onMessage(event.message))
+                if (maxTrafficChannels > 0) follow(event.message)
+            }
+            is P25Event.Voice, is P25Event.Terminator -> onConventional(event)
+            else -> Unit
         }
+    }
+
+    /** Voice on the main channel itself: a conventional P25 channel, or a voice channel tuned directly. */
+    private fun onConventional(event: P25Event) {
+        var channel = conventional
+        if (channel == null) {
+            if (event !is P25Event.Voice) return
+            channel = TrafficChannel(nextId++, controlHz, null, false, 0, null, streamTimeMs)
+            channel.receiver = control
+            (event.ldu.linkControl as? GroupVoiceUser)?.let { channel.talkgroup = it.group }
+            conventional = channel
+            traffic += channel
+            listener.onTrafficStart(channel)
+        }
+        onTraffic(channel, event)
     }
 
     private fun follow(message: TsbkMessage) {
@@ -299,6 +328,7 @@ class TrunkedReceiver(
                 when (val lc = event.ldu.linkControl) {
                     is GroupVoiceUser -> {
                         channel.linkControl = lc
+                        channel.talkgroup = lc.group
                         if (lc.source != 0) channel.source = lc.source
                         if (lc.options.encrypted) channel.encrypted = true
                     }
@@ -320,6 +350,7 @@ class TrunkedReceiver(
     private fun release(channel: TrafficChannel, reason: String) {
         if (traffic.remove(channel)) {
             cooldownUntil[cooldownKey(channel.frequencyHz, channel.timeslot)] = streamTimeMs + COOLDOWN_MS
+            if (conventional === channel) conventional = null
             channel.timeslot?.let { slot -> if (dmrCalls[slot] === channel) dmrCalls.remove(slot) }
             channel.timeslot?.let { slot ->
                 val carrier = carriers[channel.frequencyHz]

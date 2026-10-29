@@ -3,6 +3,7 @@ package com.sdrnova.t25.ui
 import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,17 +26,20 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -64,13 +68,19 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sdrnova.t25.playlist.AliasBook
+import com.sdrnova.t25.playlist.ChannelProtocol
+import com.sdrnova.t25.playlist.Playlist
+import com.sdrnova.t25.playlist.PlaylistChannel
 import com.sdrnova.t25.radio.EngineStatus
 import com.sdrnova.t25.radio.FollowedCall
+import com.sdrnova.t25.radio.HeardCall
 import com.sdrnova.t25.radio.LogLine
 import com.sdrnova.t25.radio.TrunkingView
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioEngine
 import com.sdrnova.t25.radio.SourceType
+import com.sdrnova.t25.radio.Tuning
 import com.sdrnova.t25.receiver.Mode
 import com.sdrnova.t25.source.IqSource
 import com.sdrnova.t25.trunking.Call
@@ -87,16 +97,21 @@ import kotlin.math.roundToInt
 fun MainScreen(
     engine: RadioEngine,
     initialConfig: RadioConfig,
+    playlist: Playlist,
     onStart: (RadioConfig) -> Unit,
     onStop: () -> Unit,
     onSave: (RadioConfig) -> Unit,
-    /** Applied live to the running radio and saved: gain, volume, and retuning from the spectrum. */
+    /** Applied live to the running radio and saved: gain, volume, channel picks, scanning and tap-to-tune. */
     onLiveChange: (RadioConfig) -> Unit,
+    onImportPlaylist: () -> Unit,
+    onExportPlaylist: () -> Unit,
+    onPlaylistChange: (Playlist) -> Unit,
 ) {
     val status by engine.status.collectAsStateWithLifecycle()
     val trunking by engine.trunking.collectAsStateWithLifecycle()
     val log by engine.log.collectAsStateWithLifecycle()
     val spectrum by engine.spectrum.collectAsStateWithLifecycle()
+    val aliases by engine.aliases.collectAsStateWithLifecycle()
     var config by remember { mutableStateOf(initialConfig) }
     // The waterfall keeps filling while other tabs are showing.
     val waterfall = remember { WaterfallImage() }
@@ -140,17 +155,37 @@ fun MainScreen(
                 onStart = { onStart(config) },
                 onStop = onStop,
                 onLiveChange = live,
+                onScanHold = engine::setScanHold,
+                onScanSkip = engine::skip,
             )
-            TabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background) {
-                listOf("Calls", "Log", "Spectrum", "Setup").forEachIndexed { index, title ->
+            ScrollableTabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background, edgePadding = 4.dp) {
+                listOf("Calls", "Channels", "Log", "Spectrum", "Setup").forEachIndexed { index, title ->
                     Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
                 }
             }
             when (tab) {
-                0 -> CallsTab(trunking, config.aliases)
-                1 -> LogTab(log)
-                2 -> SpectrumTab(spectrum, waterfall, status.frequencyHz, status.centerHz, status.sampleRate) { hz ->
-                    live(config.copy(frequencyHz = hz))
+                0 -> CallsTab(trunking, aliases)
+                1 -> ChannelsTab(
+                    playlist = playlist,
+                    config = config,
+                    status = status,
+                    onImport = onImportPlaylist,
+                    onExport = onExportPlaylist,
+                    onPick = { channel ->
+                        Tuning.of(channel)?.let { tuning ->
+                            live(
+                                config.copy(
+                                    frequencyHz = tuning.frequencyHz, mode = tuning.mode, channelName = channel.name,
+                                    aliasList = channel.aliasList.orEmpty(), centerHz = 0, scan = false,
+                                ),
+                            )
+                        }
+                    },
+                    onChange = onPlaylistChange,
+                )
+                2 -> LogTab(log)
+                3 -> SpectrumTab(spectrum, waterfall, status.frequencyHz, status.centerHz, status.sampleRate) { hz ->
+                    live(config.copy(frequencyHz = hz, mode = status.mode, channelName = "", scan = false))
                 }
                 else -> SetupTab(config, onChange = { config = it }, onSave = { onSave(config) })
             }
@@ -167,13 +202,20 @@ private fun StatusCard(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onLiveChange: (RadioConfig) -> Unit,
+    onScanHold: (Boolean) -> Unit,
+    onScanSkip: () -> Unit,
 ) {
     val active = status.running || status.starting
     val frequency = if (active) status.frequencyHz else config.frequencyHz
     val mode = if (active) status.mode else config.mode
+    val channelName = if (active) status.channelName else config.channelName
     val locked = status.lastSyncAt > 0 && now - status.lastSyncAt < 2_000
+    val scanPlace = "${status.scanPosition}/${status.scanSize}"
     val (dot, label) = when {
         status.starting -> Amber to "Starting…"
+        status.running && status.scanning && status.scanHold -> Amber to "Scan held on $scanPlace"
+        status.running && status.scanning && status.busy -> Good to "Scan stopped on activity, $scanPlace"
+        status.running && status.scanning -> Amber to "Scanning $scanPlace"
         status.running && mode == Mode.NBFM -> Good to "Listening"
         status.running && locked -> Good to if (mode == Mode.DMR) "DMR signal locked" else "Control channel locked"
         status.running -> Amber to if (mode == Mode.DMR) "Searching for DMR sync" else "Searching for P25 sync"
@@ -187,6 +229,9 @@ private fun StatusCard(
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
+                    if (channelName.isNotEmpty()) {
+                        Text(channelName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    }
                     Text(
                         "%.5f".format(frequency / 1e6) + " MHz",
                         style = MaterialTheme.typography.headlineMedium,
@@ -205,7 +250,18 @@ private fun StatusCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(10.dp).background(dot, CircleShape))
                 Spacer(Modifier.width(8.dp))
-                Text(label, style = MaterialTheme.typography.bodyMedium)
+                Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                FilterChip(
+                    selected = config.scan,
+                    onClick = { onLiveChange(config.copy(scan = !config.scan)) },
+                    label = { Text("Scan") },
+                )
+            }
+            if (status.running && status.scanning) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { onScanHold(!status.scanHold) }) { Text(if (status.scanHold) "Resume" else "Hold") }
+                    OutlinedButton(onClick = onScanSkip) { Text("Skip") }
+                }
             }
             status.error?.let {
                 Spacer(Modifier.height(6.dp))
@@ -303,11 +359,11 @@ private fun StatRow(vararg stats: Pair<String, String>) {
 }
 
 @Composable
-private fun CallsTab(trunking: TrunkingView, aliases: Map<Int, String>) {
+private fun CallsTab(trunking: TrunkingView, aliases: AliasBook) {
     val active = trunking.active
     val recent = trunking.recent
     LazyColumn(Modifier.fillMaxSize()) {
-        if (trunking.following.isEmpty() && active.isEmpty() && recent.isEmpty()) {
+        if (trunking.following.isEmpty() && active.isEmpty() && recent.isEmpty() && trunking.heard.isEmpty()) {
             item {
                 Text(
                     "No calls yet. Voice grants from the control channel show up here, with frequencies once the " +
@@ -326,22 +382,51 @@ private fun CallsTab(trunking: TrunkingView, aliases: Map<Int, String>) {
             item { SectionHeader("Active") }
             items(active, key = { "a${it.unitToUnit}${it.talkgroup}" }) { CallRow(it, aliases, live = true) }
         }
+        if (trunking.heard.isNotEmpty()) {
+            item { SectionHeader("Heard") }
+            items(trunking.heard) { HeardRow(it, aliases) }
+        }
         if (recent.isNotEmpty()) {
-            item { SectionHeader("Recent") }
+            item { SectionHeader("Recent grants") }
             items(recent) { CallRow(it, aliases, live = false) }
         }
     }
 }
 
 @Composable
-private fun FollowedRow(call: FollowedCall, aliases: Map<Int, String>) {
-    val alias = if (call.unitToUnit) null else aliases[call.talkgroup]
+private fun HeardRow(call: HeardCall, aliases: AliasBook) {
+    val alias = if (call.unitToUnit) null else aliases.name(call.talkgroup)
+    val title = alias ?: if (call.unitToUnit) "Private ${call.talkgroup}" else "TG ${call.talkgroup}"
+    val details = buildList {
+        add(call.channel)
+        TrunkingTracker.mhz(call.frequencyHz).takeIf { it != call.channel }?.let(::add)
+        if (alias != null) add("TG ${call.talkgroup}")
+        call.timeslot?.let { add("TS$it") }
+        call.source?.let { add("from " + (aliases.radioName(it) ?: it.toString())) }
+    }.joinToString(" · ")
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(details, style = MaterialTheme.typography.bodySmall, color = Muted)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(TIME.format(Date(call.endedAt)), style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace, color = Muted)
+            Text("${call.seconds}s", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = Muted)
+            if (call.encrypted) Flag("ENC", Amber)
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+}
+
+@Composable
+private fun FollowedRow(call: FollowedCall, aliases: AliasBook) {
+    val alias = if (call.unitToUnit) null else aliases.name(call.talkgroup)
     val title = alias ?: if (call.unitToUnit) "Private ${call.talkgroup}" else "TG ${call.talkgroup}"
     val details = buildList {
         if (alias != null) add("TG ${call.talkgroup}")
         add(TrunkingTracker.mhz(call.frequencyHz))
         call.timeslot?.let { add("TS$it") }
-        call.source?.let { add("from $it") }
+        call.source?.let { add("from " + (aliases.radioName(it) ?: it.toString())) }
     }.joinToString(" · ")
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
@@ -364,6 +449,7 @@ private fun FollowedRow(call: FollowedCall, aliases: Map<Int, String>) {
             )
             when {
                 call.encrypted -> Flag("ENC", Amber)
+                !call.unitToUnit && aliases.lockedOut(call.talkgroup) -> Flag("LOCKOUT", Muted)
                 call.playing -> Flag("AUDIO", Good)
             }
         }
@@ -381,14 +467,14 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun CallRow(call: Call, aliases: Map<Int, String>, live: Boolean) {
-    val alias = if (call.unitToUnit) null else aliases[call.talkgroup]
+private fun CallRow(call: Call, aliases: AliasBook, live: Boolean) {
+    val alias = if (call.unitToUnit) null else aliases.name(call.talkgroup)
     val title = alias ?: if (call.unitToUnit) "Private ${call.talkgroup}" else "TG ${call.talkgroup}"
     val details = buildList {
         if (alias != null) add("TG ${call.talkgroup}")
         add(call.frequencyHz?.let(TrunkingTracker::mhz) ?: "channel ${call.channel}")
         call.slot?.let { add("TS${it + 1}") }
-        call.source?.takeIf { it != 0 }?.let { add("from $it") }
+        call.source?.takeIf { it != 0 }?.let { add("from " + (aliases.radioName(it) ?: it.toString())) }
     }.joinToString(" · ")
     val seconds = ((call.lastSeen - call.firstSeen) / 1000).coerceAtLeast(1)
 
@@ -428,6 +514,113 @@ private fun Flag(text: String, color: Color) {
         fontSize = 10.sp,
         fontWeight = FontWeight.Bold,
     )
+}
+
+/** sdrtrunk playlist channels: pick one to listen to, tick the ones to scan. */
+@Composable
+private fun ChannelsTab(
+    playlist: Playlist,
+    config: RadioConfig,
+    status: EngineStatus,
+    onImport: () -> Unit,
+    onExport: () -> Unit,
+    onPick: (PlaylistChannel) -> Unit,
+    onChange: (Playlist) -> Unit,
+) {
+    var confirmClear by remember { mutableStateOf(false) }
+    val active = status.running || status.starting
+    val hereHz = if (active) status.frequencyHz else config.frequencyHz
+    val hereMode = if (active) status.mode else config.mode
+    val scannable = playlist.channels.count { it.enabled && Tuning.of(it) != null }
+    val empty = playlist.channels.isEmpty() && playlist.aliases.isEmpty()
+
+    LazyColumn(Modifier.fillMaxSize()) {
+        item {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onImport) { Text("Import sdrtrunk XML") }
+                    OutlinedButton(onClick = onExport, enabled = !empty) { Text("Export") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = {
+                        val channel = PlaylistChannel(
+                            name = "%.4f MHz".format(hereHz / 1e6), system = "SDRNova", site = "", enabled = true,
+                            frequencies = listOf(hereHz), protocol = ChannelProtocol.of(hereMode), decoderType = "",
+                            modulation = null, aliasList = config.aliasList.ifEmpty { null },
+                        )
+                        onChange(playlist.copy(channels = playlist.channels + channel))
+                    }) { Text("Add %.4f".format(hereHz / 1e6)) }
+                    if (!empty) {
+                        TextButton(onClick = {
+                            if (confirmClear) onChange(Playlist.EMPTY)
+                            confirmClear = !confirmClear
+                        }) { Text(if (confirmClear) "Tap again to clear" else "Clear all", color = Alert) }
+                    }
+                }
+                Text(
+                    if (empty) {
+                        "Import playlist_v4.xml from sdrtrunk (in SDRTrunk/playlist on the desktop) to bring over its " +
+                            "channels and talkgroup aliases, or add the frequency you're on. Tap a channel to listen; " +
+                            "ticked channels are scanned when Scan is on."
+                    } else {
+                        "${playlist.channels.size} channels, $scannable ticked for scanning · ${playlist.aliases.size} aliases"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted,
+                )
+            }
+        }
+        for ((system, channels) in playlist.channels.groupBy { it.system.ifEmpty { "Other" } }) {
+            item { SectionHeader(system) }
+            items(channels) { channel ->
+                ChannelRow(
+                    channel = channel,
+                    selected = channel.name == config.channelName && channel.frequencies.firstOrNull() == hereHz,
+                    onPick = { onPick(channel) },
+                    onToggleScan = {
+                        onChange(playlist.copy(channels = playlist.channels.map { if (it === channel) it.copy(enabled = !it.enabled) else it }))
+                    },
+                    onRemove = { onChange(playlist.copy(channels = playlist.channels.filter { it !== channel })) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelRow(
+    channel: PlaylistChannel,
+    selected: Boolean,
+    onPick: () -> Unit,
+    onToggleScan: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val supported = Tuning.of(channel) != null
+    val details = buildList {
+        if (channel.site.isNotEmpty()) add(channel.site)
+        add(channel.protocol.label + if (channel.simulcast) " (LSM)" else "")
+        channel.frequencies.firstOrNull()?.let { add(TrunkingTracker.mhz(it)) }
+        if (channel.frequencies.size > 1) add("+${channel.frequencies.size - 1} alternate")
+        if (!supported) add("not decoded yet")
+    }.joinToString(" · ")
+    Row(
+        Modifier.fillMaxWidth()
+            .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+            .clickable(enabled = supported, onClick = onPick)
+            .padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = channel.enabled && supported, onCheckedChange = { onToggleScan() }, enabled = supported)
+        Column(Modifier.weight(1f)) {
+            Text(
+                channel.name.ifEmpty { "(unnamed)" },
+                style = MaterialTheme.typography.titleMedium,
+                color = if (supported) MaterialTheme.colorScheme.onSurface else Muted,
+            )
+            Text(details, style = MaterialTheme.typography.bodySmall, color = Muted)
+        }
+        Text("✕", modifier = Modifier.clickable(onClick = onRemove).padding(12.dp), color = Muted)
+    }
 }
 
 @Composable
@@ -546,7 +739,8 @@ private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSav
             value = frequencyText,
             onValueChange = { text ->
                 frequencyText = text
-                text.toDoubleOrNull()?.takeIf { it in 24.0..1766.0 }?.let { onChange(config.copy(frequencyHz = (it * 1e6).roundToInt().toLong())) }
+                text.toDoubleOrNull()?.takeIf { it in 24.0..1766.0 }
+                    ?.let { onChange(config.copy(frequencyHz = (it * 1e6).roundToInt().toLong(), channelName = "")) }
             },
             label = { Text("Frequency (MHz): P25 control channel, or the DMR/NBFM channel") },
             singleLine = true,
@@ -664,6 +858,19 @@ private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSav
             }
             Switch(checked = config.biasTee, onCheckedChange = { onChange(config.copy(biasTee = it)) })
         }
+
+        Label("Scan: listen %.1f s to each quiet channel".format(config.scanDwellMs / 1000.0))
+        Slider(
+            value = config.scanDwellMs.toFloat(),
+            onValueChange = { onChange(config.copy(scanDwellMs = (it / 100).roundToInt() * 100)) },
+            valueRange = 200f..3_000f,
+        )
+        Label("Scan: wait %.1f s after a call for the reply".format(config.scanHangMs / 1000.0))
+        Slider(
+            value = config.scanHangMs.toFloat(),
+            onValueChange = { onChange(config.copy(scanHangMs = (it / 500).roundToInt() * 500)) },
+            valueRange = 0f..10_000f,
+        )
 
         Label("NBFM squelch: " + if (config.squelch <= 0f) "off" else "%.2f".format(config.squelch))
         Slider(value = config.squelch, onValueChange = { onChange(config.copy(squelch = it)) }, valueRange = 0f..2f)

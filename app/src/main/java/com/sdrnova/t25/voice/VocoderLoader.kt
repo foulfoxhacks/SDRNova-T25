@@ -20,6 +20,7 @@ object VocoderLoader {
     private const val LIBRARY_CLASS = "jmbe.JMBEAudioLibrary"
     private const val CODEC_INTERFACE = "jmbe.iface.IAudioCodec"
     private const val IMBE = "IMBE"
+    private const val AMBE = "AMBE"
 
     fun providerFile(context: Context) = File(context.filesDir, "vocoder/provider.jar")
 
@@ -78,8 +79,12 @@ object VocoderLoader {
         private val getAudio: Method,
         private val reset: Method,
     ) : VocoderProvider {
-        override fun createImbeDecoder(): VoiceDecoder? {
-            val codec = getConverter.invoke(library, IMBE) ?: return null
+        override fun createImbeDecoder(): VoiceDecoder? = decoder(IMBE)
+
+        override fun createAmbeDecoder(): VoiceDecoder? = decoder(AMBE)
+
+        private fun decoder(codecName: String): VoiceDecoder? {
+            val codec = runCatching { getConverter.invoke(library, codecName) }.getOrNull() ?: return null
             return object : VoiceDecoder {
                 override fun decode(frame: ByteArray): FloatArray = getAudio.invoke(codec, lsbFirst(frame)) as FloatArray
 
@@ -91,8 +96,8 @@ object VocoderLoader {
 
         /** JMBE reads frames the way java.util.BitSet packs them: bit 0 in the low bit of byte 0. */
         private fun lsbFirst(frame: ByteArray): ByteArray {
-            val out = ByteArray(18)
-            for (bit in 0 until 144) {
+            val out = ByteArray(frame.size)
+            for (bit in 0 until frame.size * 8) {
                 if ((frame[bit / 8].toInt() ushr (7 - bit % 8)) and 1 == 1) {
                     out[bit / 8] = (out[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
                 }

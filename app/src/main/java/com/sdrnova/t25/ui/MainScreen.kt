@@ -282,6 +282,7 @@ private fun FollowedRow(call: FollowedCall, aliases: Map<Int, String>) {
     val details = buildList {
         if (alias != null) add("TG ${call.talkgroup}")
         add(TrunkingTracker.mhz(call.frequencyHz))
+        call.timeslot?.let { add("Phase 2 TS$it") }
         call.source?.let { add("from $it") }
     }.joinToString(" · ")
     Row(
@@ -471,7 +472,7 @@ private fun SetupTab(
 
         Label("Mode")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Mode.entries.forEach { mode ->
+            Mode.entries.filter { it.selectable }.forEach { mode ->
                 FilterChip(selected = config.mode == mode, onClick = { onChange(config.copy(mode = mode)) }, label = { Text(mode.label) })
             }
         }

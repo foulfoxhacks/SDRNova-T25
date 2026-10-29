@@ -5,7 +5,10 @@ package com.sdrnova.t25.voice
  * person building or running the app (see docs/VOCODER.md).
  */
 interface VoiceDecoder {
-    /** Decodes one raw 144-bit IMBE frame (MSB-first, still interleaved) into 160 samples at 8 kHz, about ±1.0. */
+    /**
+     * Decodes one raw frame (MSB-first, still FEC coded) into 160 samples at 8 kHz, about ±1.0: a 144-bit IMBE frame
+     * for Phase 1, or a 72-bit AMBE+2 frame for Phase 2.
+     */
     fun decode(frame: ByteArray): FloatArray
 
     fun reset()
@@ -16,6 +19,9 @@ interface VocoderProvider {
 
     /** A fresh, independent IMBE decoder (they keep state between frames), or null if IMBE isn't supported. */
     fun createImbeDecoder(): VoiceDecoder?
+
+    /** A fresh AMBE+2 half-rate decoder for Phase 2 voice, or null if unsupported. */
+    fun createAmbeDecoder(): VoiceDecoder? = null
 }
 
 /** Upsamples 8 kHz vocoder output to the channel audio rate with a windowed-sinc interpolator. */

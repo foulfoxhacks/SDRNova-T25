@@ -8,6 +8,7 @@ import com.sdrnova.t25.p25.P25
 import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.p25.SignalGenerator
 import com.sdrnova.t25.p25.TsbkBuilder
+import com.sdrnova.t25.p25.phase2.Phase2Generator
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -112,6 +113,93 @@ class TrunkedReceiverTest {
         assertEquals(5678, lc.source)
         assertEquals(false, voice.first { it.duid == P25.DUID_LDU2 }.encryption!!.encrypted)
         assertArrayEquals(frames[4], voice.first().voiceFrames[4])
+        assertEquals(listOf("end of transmission"), ended)
+    }
+
+    @Test
+    fun `follows a Phase 2 grant onto its TDMA timeslot`() {
+        val random = Random(31)
+        // Band 2: 2-slot TDMA (channel type 3), 851 MHz base, 12.5 kHz carriers. Channel 41 is carrier 20, slot 2.
+        val tdmaBand = TsbkBuilder(opcode = 0x33, lastBlock = false)
+            .set(16, 4, 2).set(20, 4, 3).set(38, 10, 100).set(48, 32, 851_000_000L / 5).build()
+        val network = TsbkBuilder(opcode = 0x3B).set(16, 8, 1).set(24, 20, 0xBEE00).set(44, 12, 0x1C7).build()
+        val grant = TsbkBuilder(opcode = 0x00)
+            .set(24, 4, 2).set(28, 12, 41).set(40, 16, 2222).set(56, 24, 7777).build()
+        val control = ArrayList<Int>()
+        repeat(60) { control += random.nextInt(4) }
+        for (frame in 0 until 60) {
+            val blocks = if (frame % 4 == 0) listOf(tdmaBand, network) else listOf(grant)
+            SignalGenerator.tsduFrame(nac, blocks).forEach { control += it }
+        }
+
+        val scrambler = com.sdrnova.t25.p25.phase2.Scrambler(
+            com.sdrnova.t25.p25.phase2.ScrambleParameters(0xBEE00, 0x1C7, nac),
+        )
+
+        val ambe = List(4) { ByteArray(9).also(random::nextBytes) }
+        val idle = Phase2Generator.Facch(Phase2Generator.idlePdu())
+        val traffic = ArrayList<Int>()
+        repeat(600) { traffic += random.nextInt(4) }
+        for (superframe in 0 until 5) {
+            for (sequence in 0..2) {
+                val channel2 = when {
+                    superframe < 4 -> List(2) { Phase2Generator.Voice4(ambe) }
+                    sequence == 0 -> listOf(Phase2Generator.Facch(Phase2Generator.endPttPdu(2222, 7777)), idle)
+                    else -> listOf(idle, idle)
+                }
+                Phase2Generator.fragment(sequence, listOf(idle, idle), channel2, scrambler).forEach { traffic += it }
+            }
+        }
+
+        val iq = SignalGenerator.combine(
+            listOf(
+                SignalGenerator.carrier(SignalGenerator.deviation(control.toIntArray()), rate, (controlHz - centerHz) + 150.0),
+                Phase2Generator.modulate(traffic.toIntArray(), rate, (trafficHz - centerHz) + 200.0),
+            ),
+            rate, snrDb = 20.0, amplitude = 0.25, random = random,
+        )
+
+        val started = ArrayList<TrunkedReceiver.TrafficChannel>()
+        val ended = ArrayList<String>()
+        var ambeFrames = 0
+        var lastFrame: ByteArray? = null
+        val log = ArrayList<String>()
+        val receiver = TrunkedReceiver(rate, centerHz, controlHz, Mode.P25_PHASE1, maxTrafficChannels = 2,
+            listener = object : TrunkedReceiver.Listener {
+                override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
+                    started += channel
+                }
+
+                override fun onTrafficAmbe(channel: TrunkedReceiver.TrafficChannel, frames: List<ByteArray>) {
+                    ambeFrames += frames.size
+                    lastFrame = frames[1]
+                }
+
+                override fun onTrafficEnd(channel: TrunkedReceiver.TrafficChannel, reason: String) {
+                    ended += reason
+                }
+
+                override fun onLog(text: String) {
+                    log += text
+                }
+            })
+        val floats = FloatArray(32_768)
+        var offset = 0
+        while (offset < iq.size) {
+            val length = minOf(32_768, iq.size - offset)
+            val count = SampleFormat.UNSIGNED_8.toFloat(iq.copyOfRange(offset, offset + length), length, floats)
+            receiver.process(floats, count)
+            offset += length
+        }
+        println("phase2 follow: started=${started.map { "${it.frequencyHz}/TS${it.timeslot}" }} ambe=$ambeFrames ended=$ended")
+        println(log.filter { "Phase 2" in it || "Waiting" in it }.take(3))
+
+        assertEquals(1, started.size, "one Phase 2 call should open")
+        assertEquals(trafficHz, started[0].frequencyHz)
+        assertEquals(2, started[0].timeslot)
+        assertEquals(2222, started[0].talkgroup)
+        assertTrue(ambeFrames >= 40, "decoded $ambeFrames AMBE frames")
+        assertArrayEquals(ambe[1], lastFrame)
         assertEquals(listOf("end of transmission"), ended)
     }
 

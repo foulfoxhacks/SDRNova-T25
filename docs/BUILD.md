@@ -45,7 +45,8 @@ output somewhere short:
 - P25 Phase 1 control channel: sync, NID, TSBK decode with CRC, band plan, site identity, voice grants and grant updates resolved to frequencies, active and recent calls, talkgroup aliases
 - Traffic channel following: up to four voice channels decoded alongside the control channel, as long as they sit inside the tuner's bandwidth (like sdrtrunk with a single tuner)
 - LDU1/LDU2 decoding: IMBE voice frames, link control (talkgroup and radio ID, Hamming(10,6) + Reed-Solomon(24,12,13)), encryption sync (algorithm and key ID, Reed-Solomon(24,16,9)); TDU/TDULC end calls
-- Voice audio through an IMBE `VocoderProvider` you supply; see [VOCODER.md](VOCODER.md)
+- P25 Phase 2 TDMA voice channels: grants on 2-slot TDMA bands are followed per timeslot. H-DQPSK demodulation, superframe fragments, ISCH, the WACN/system/NAC scrambling sequence, FACCH/SACCH (RS(63,35) + CRC-12) MAC PDUs (PTT, END PTT, voice channel user) and AMBE+2 voice frames; both timeslots of a carrier share one demodulator
+- Voice audio through a `VocoderProvider` you supply (IMBE for Phase 1, AMBE+2 for Phase 2); see [VOCODER.md](VOCODER.md)
 - Analog NBFM with noise squelch and audio
 - Spectrum view of the tuner bandwidth
 
@@ -53,7 +54,8 @@ output somewhere short:
 
 - HDU decoding and TDULC link control (both are only used as call boundaries for now)
 - AMBTC opcodes other than the group voice grant are logged by name only; packet data PDUs are skipped
-- Phase 2 TDMA and DMR
+- Phase 2 on 4-slot (25 kHz) TDMA bands, Phase 2 LCCH control channels, and Phase 2 encryption sync (ESS) details
+- DMR
 - E4000 over USB (sdrtrunk's driver is ~1,300 lines of gain and filter tables; still to port). FC0012 and FC2580 have no sdrtrunk implementation to follow. All three work through `rtl_tcp`, which drives them with librtlsdr on the server side.
 
 ## Credits

@@ -52,6 +52,7 @@ data class EngineStatus(
 data class FollowedCall(
     val id: Int,
     val frequencyHz: Long,
+    val timeslot: Int?,
     val talkgroup: Int,
     val source: Int?,
     val unitToUnit: Boolean,
@@ -283,16 +284,28 @@ class RadioEngine(private val context: Context) {
             }
 
             override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
-                addLog(withAliases("Following ${label(channel)} on ${TrunkingTracker.mhz(channel.frequencyHz)}"))
+                val slot = channel.timeslot?.let { " TDMA slot $it" } ?: ""
+                addLog(withAliases("Following ${label(channel)} on ${TrunkingTracker.mhz(channel.frequencyHz)}$slot"))
             }
 
-            override fun onTrafficVoice(channel: TrunkedReceiver.TrafficChannel, ldu: Ldu) {
+            override fun onTrafficVoice(channel: TrunkedReceiver.TrafficChannel, ldu: Ldu) =
+                play(channel, ldu.voiceFrames) { it.createImbeDecoder() }
+
+            override fun onTrafficAmbe(channel: TrunkedReceiver.TrafficChannel, frames: List<ByteArray>) =
+                play(channel, frames) { it.createAmbeDecoder() }
+
+            /** One call has the speaker at a time: the first to deliver voice keeps it until it ends. */
+            private fun play(
+                channel: TrunkedReceiver.TrafficChannel,
+                frames: List<ByteArray>,
+                create: (VocoderProvider) -> VoiceDecoder?,
+            ) {
                 val provider = vocoder ?: return
                 if (channel.encrypted) return
                 if (playingChannel == null) playingChannel = channel.id
                 if (playingChannel != channel.id) return
-                val decoder = decoders.getOrPut(channel.id) { provider.createImbeDecoder() ?: return }
-                for (frame in ldu.voiceFrames) {
+                val decoder = decoders.getOrPut(channel.id) { create(provider) ?: return }
+                for (frame in frames) {
                     val pcm = runCatching { decoder.decode(frame) }.getOrNull() ?: continue
                     val samples = resampler.process(pcm)
                     audio?.write(samples, samples.size)
@@ -302,6 +315,7 @@ class RadioEngine(private val context: Context) {
             override fun onTrafficEnd(channel: TrunkedReceiver.TrafficChannel, reason: String) {
                 decoders.remove(channel.id)
                 if (playingChannel == channel.id) playingChannel = null
+                // Every voice frame is 20 ms, Phase 1 or 2.
                 val seconds = channel.voiceFrames / 50
                 addLog(withAliases("${label(channel)} ended after ${seconds}s ($reason)"))
             }
@@ -343,7 +357,7 @@ class RadioEngine(private val context: Context) {
                 site = tracker.site,
                 following = receiver.trafficChannels.map {
                     FollowedCall(
-                        it.id, it.frequencyHz, it.talkgroup, it.source, it.unitToUnit, it.encrypted, it.voiceFrames,
+                        it.id, it.frequencyHz, it.timeslot, it.talkgroup, it.source, it.unitToUnit, it.encrypted, it.voiceFrames,
                         playing = it.id == playingChannel,
                     )
                 },

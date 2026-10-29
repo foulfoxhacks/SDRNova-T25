@@ -1,14 +1,16 @@
-# Voice audio (IMBE)
+# Voice audio (IMBE and AMBE+2)
 
-P25 Phase 1 voice is IMBE-coded. IMBE is patent-encumbered, so SDRNova T25 ships without a decoder. Without one
+P25 Phase 1 voice is IMBE-coded and Phase 2 voice is AMBE+2 (half rate). Both are patent-encumbered, so SDRNova T25
+ships without a decoder. Without one
 the app still follows calls onto their voice channels and logs the talkgroup, the radio ID and whether the call is
 encrypted, but it plays no audio.
 
 Supplying a decoder is your responsibility, and so is checking that you're allowed to use one where you live. This
 mirrors how sdrtrunk handles [JMBE](https://github.com/DSheirer/jmbe).
 
-The app looks for JMBE's `jmbe.JMBEAudioLibrary` class and drives it through JMBE's `IAudioCodecLibrary` API. Frames
-are handed over raw (interleaved and FEC coded), exactly as sdrtrunk passes them, and JMBE does the rest.
+The app looks for JMBE's `jmbe.JMBEAudioLibrary` class and drives it through JMBE's `IAudioCodecLibrary` API, asking
+for its `IMBE` and `AMBE` codecs. Frames are handed over raw (144-bit IMBE, 72-bit AMBE+2, still FEC coded), exactly
+as sdrtrunk passes them, and JMBE does the rest.
 
 > This path hasn't been tested against a real JMBE build yet. Please report what happens.
 

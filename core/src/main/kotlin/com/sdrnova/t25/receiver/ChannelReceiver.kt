@@ -8,14 +8,22 @@ import com.sdrnova.t25.dsp.SampleFormat
 import com.sdrnova.t25.p25.C4fmDemodulator
 import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.p25.P25P1Framer
+import com.sdrnova.t25.p25.phase2.DqpskDemodulator
+import com.sdrnova.t25.p25.phase2.P25P2Framer
+import com.sdrnova.t25.p25.phase2.Phase2Event
+import com.sdrnova.t25.p25.phase2.ScrambleParameters
+import com.sdrnova.t25.p25.phase2.Scrambler
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.log10
 import kotlin.math.sqrt
 
-enum class Mode(val label: String) {
+enum class Mode(val label: String, val selectable: Boolean = true) {
     P25_PHASE1("P25 Phase 1"),
     NBFM("Analog NBFM"),
+
+    /** Phase 2 TDMA voice carriers, reached by following grants from a Phase 1 control channel. */
+    P25_PHASE2("P25 Phase 2 TDMA", selectable = false),
 }
 
 /**
@@ -30,6 +38,7 @@ class ChannelReceiver(
 ) {
     interface Listener {
         fun onP25Event(event: P25Event) {}
+        fun onPhase2Event(event: Phase2Event) {}
         fun onAudio(samples: ShortArray, count: Int) {}
     }
 
@@ -40,6 +49,8 @@ class ChannelReceiver(
     private val framer = P25P1Framer(::onFramerEvent)
     private val demodulator = C4fmDemodulator(channelRate.toDouble(), framer)
     private val nbfm = NbfmDemodulator(channelRate)
+    private val phase2Framer = P25P2Framer(::onPhase2Event)
+    private val dqpsk = DqpskDemodulator(channelRate.toDouble(), phase2Framer)
     private var work = FloatArray(0)
     private var converted = FloatArray(0)
     private var audio = ShortArray(0)
@@ -51,12 +62,24 @@ class ChannelReceiver(
             field = value
             afcHz = 0.0
             demodulator.reset()
+            dqpsk.reset()
             updateMixer()
         }
 
     /** Carrier offset the P25 decoder has measured and corrected, in Hz. */
     var afcHz = 0.0
         private set
+
+    /** Starts the carrier correction from a known offset, e.g. the control channel's scaled to this frequency. */
+    fun presetAfc(hz: Double) {
+        afcHz = hz.coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
+        updateMixer()
+    }
+
+    /** Phase 2 traffic is scrambled with a sequence seeded from the site's WACN, system and NAC. */
+    fun setScrambleParameters(parameters: ScrambleParameters) {
+        phase2Framer.scrambler = Scrambler(parameters)
+    }
 
     /** Channel power after filtering, in dB relative to a full-scale carrier. */
     val signalDbfs: Float get() = (10 * log10(powerAverage)).toFloat()
@@ -81,6 +104,8 @@ class ChannelReceiver(
         val (pass, stop) = when (mode) {
             Mode.P25_PHASE1 -> 5_200.0 to 6_500.0
             Mode.NBFM -> 6_000.0 to 8_500.0
+            // H-DQPSK at 6000 baud with alpha 0.2 occupies ±3.6 kHz; the RRC matched filter does the rest.
+            Mode.P25_PHASE2 -> 4_800.0 to 6_500.0
         }
         channelFilter = ComplexFirDecimator(FirDesign.lowPass(channelRate.toDouble(), pass, stop, 60.0), 1)
         updateMixer()
@@ -107,6 +132,7 @@ class ChannelReceiver(
 
         when (mode) {
             Mode.P25_PHASE1 -> demodulator.process(work, count)
+            Mode.P25_PHASE2 -> dqpsk.process(work, count)
             Mode.NBFM -> {
                 if (audio.size < count) audio = ShortArray(count)
                 nbfm.process(work, count, audio)
@@ -122,6 +148,14 @@ class ChannelReceiver(
             updateMixer()
         }
         listener.onP25Event(event)
+    }
+
+    private fun onPhase2Event(event: Phase2Event) {
+        if (event is Phase2Event.Sync) {
+            afcHz = (afcHz + 0.5 * event.frequencyErrorHz).coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
+            updateMixer()
+        }
+        listener.onPhase2Event(event)
     }
 
     private fun updateMixer() {

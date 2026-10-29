@@ -56,7 +56,7 @@ output somewhere short:
 - HDU decoding and TDULC link control (both are only used as call boundaries for now)
 - AMBTC opcodes other than the group voice grant are logged by name only; packet data PDUs are skipped
 - Phase 2 on 4-slot (25 kHz) TDMA bands, Phase 2 LCCH control channels, and Phase 2 encryption sync (ESS) details
-- DMR
+- DMR trunking (Tier III, Capacity Plus, Connect Plus): grants are decoded and logged, but following them needs a logical-channel-to-frequency map, which isn't configurable yet. Embedded link control (late entry), data packets and talker alias aren't decoded
 - E4000 over USB (sdrtrunk's driver is ~1,300 lines of gain and filter tables; still to port). FC0012 and FC2580 have no sdrtrunk implementation to follow. All three work through `rtl_tcp`, which drives them with librtlsdr on the server side.
 
 ## Credits

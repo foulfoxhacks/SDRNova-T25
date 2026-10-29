@@ -1,21 +1,19 @@
 package com.sdrnova.t25.source.airspy
 
 import android.content.Context
-import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
-import android.hardware.usb.UsbRequest
 import com.sdrnova.t25.dsp.RealToComplex
 import com.sdrnova.t25.dsp.SampleFormat
 import com.sdrnova.t25.receiver.ChannelReceiver
 import com.sdrnova.t25.source.IqSource
+import com.sdrnova.t25.source.UsbBulk
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.concurrent.TimeoutException
 
 /**
  * Airspy R2 and Mini over Android's USB host API, with the vendor requests from sdrtrunk's AirspyTunerController
@@ -84,28 +82,13 @@ class AirspySource private constructor(
         running = true
         val converter = RealToComplex()
         synchronized(lock) { out(RECEIVER_MODE, 1, 0) }
-        val requests = List(REQUEST_COUNT) { UsbRequest().apply { initialize(connection, endpoint) } }
         val raw = ShortArray(BUFFER_SIZE / 2)
         val iq = FloatArray(BUFFER_SIZE / 2)
         val bytes = ByteArray(BUFFER_SIZE)
         try {
-            for (request in requests) {
-                val buffer = ByteBuffer.allocateDirect(BUFFER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
-                request.clientData = buffer
-                if (!request.queue(buffer)) throw IOException("could not queue USB transfer")
-            }
-            while (running) {
-                val done = try {
-                    connection.requestWait(500)
-                } catch (_: TimeoutException) {
-                    continue
-                } ?: throw IOException("USB transfer failed; was the Airspy unplugged?")
-                val buffer = done.clientData as ByteBuffer
-                val samples = buffer.position() / 2
-                buffer.flip()
+            UsbBulk.stream(connection, endpoint, BUFFER_SIZE, REQUEST_COUNT, "Airspy", { running }) { buffer ->
+                val samples = buffer.remaining() / 2
                 buffer.asShortBuffer().get(raw, 0, samples)
-                buffer.clear()
-                if (running && !done.queue(buffer)) throw IOException("could not re-queue USB transfer")
 
                 val pairs = samples / 2
                 converter.convert(raw, pairs, iq)
@@ -118,10 +101,6 @@ class AirspySource private constructor(
             }
         } finally {
             running = false
-            for (request in requests) {
-                request.cancel()
-                request.close()
-            }
             synchronized(lock) { runCatching { out(RECEIVER_MODE, 0, 0) } }
         }
     }
@@ -184,11 +163,8 @@ class AirspySource private constructor(
             val manager = context.getSystemService(UsbManager::class.java)
             val connection = manager.openDevice(device) ?: throw IOException("Android refused to open the Airspy")
             try {
-                val usbInterface = device.getInterface(0)
+                val (usbInterface, endpoint) = UsbBulk.findBulkIn(device) ?: throw IOException("no bulk IN endpoint on the Airspy")
                 if (!connection.claimInterface(usbInterface, true)) throw IOException("could not claim the Airspy interface")
-                val endpoint = (0 until usbInterface.endpointCount).map(usbInterface::getEndpoint).firstOrNull {
-                    it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN
-                } ?: throw IOException("no bulk IN endpoint on the Airspy")
                 val name = runCatching { device.productName }.getOrNull() ?: "Airspy"
 
                 // The firmware lists its rates; pick the lowest one at or above the request that decimates cleanly.

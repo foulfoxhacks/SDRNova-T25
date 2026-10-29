@@ -1,17 +1,15 @@
 package com.sdrnova.t25.source.rtlsdr
 
 import android.content.Context
-import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
-import android.hardware.usb.UsbRequest
 import com.sdrnova.t25.source.IqSource
+import com.sdrnova.t25.source.UsbBulk
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.util.concurrent.TimeoutException
 
 /** An RTL2832U dongle with an R820T/R820T2/R828D tuner, driven directly through Android's USB host API. */
 class RtlSdrUsbSource private constructor(
@@ -73,34 +71,15 @@ class RtlSdrUsbSource private constructor(
     override fun stream(sink: (ByteArray, Int) -> Unit) {
         running = true
         synchronized(lock) { rtl.resetBuffer() }
-        val requests = List(REQUEST_COUNT) { UsbRequest().apply { initialize(connection, endpoint) } }
         val chunk = ByteArray(BUFFER_SIZE)
         try {
-            for (request in requests) {
-                val buffer = ByteBuffer.allocateDirect(BUFFER_SIZE)
-                request.clientData = buffer
-                if (!request.queue(buffer)) throw IOException("could not queue USB transfer")
-            }
-            while (running) {
-                val done = try {
-                    connection.requestWait(500)
-                } catch (_: TimeoutException) {
-                    continue
-                } ?: throw IOException("USB transfer failed; was the dongle unplugged?")
-                val buffer = done.clientData as ByteBuffer
-                val length = buffer.position()
-                buffer.flip()
+            UsbBulk.stream(connection, endpoint, BUFFER_SIZE, REQUEST_COUNT, "dongle", { running }) { buffer ->
+                val length = buffer.remaining()
                 buffer.get(chunk, 0, length)
-                buffer.clear()
                 if (length > 0) sink(chunk, length)
-                if (running && !done.queue(buffer)) throw IOException("could not re-queue USB transfer")
             }
         } finally {
             running = false
-            for (request in requests) {
-                request.cancel()
-                request.close()
-            }
         }
     }
 
@@ -138,11 +117,8 @@ class RtlSdrUsbSource private constructor(
             val manager = context.getSystemService(UsbManager::class.java)
             val connection = manager.openDevice(device) ?: throw IOException("Android refused to open the USB device")
             try {
-                val usbInterface = device.getInterface(0)
+                val (usbInterface, endpoint) = UsbBulk.findBulkIn(device) ?: throw IOException("no bulk IN endpoint on the dongle")
                 if (!connection.claimInterface(usbInterface, true)) throw IOException("could not claim the USB interface")
-                val endpoint = (0 until usbInterface.endpointCount).map(usbInterface::getEndpoint).firstOrNull {
-                    it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN
-                } ?: throw IOException("no bulk IN endpoint on the dongle")
 
                 val rtl = Rtl2832(connection)
                 rtl.initBaseband()

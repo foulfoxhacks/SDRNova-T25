@@ -38,7 +38,13 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import com.sdrnova.t25.radio.AudioOutput
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -84,12 +90,21 @@ fun MainScreen(
     onStart: (RadioConfig) -> Unit,
     onStop: () -> Unit,
     onSave: (RadioConfig) -> Unit,
+    /** Applied live to the running radio and saved: gain, volume, and retuning from the spectrum. */
+    onLiveChange: (RadioConfig) -> Unit,
 ) {
     val status by engine.status.collectAsStateWithLifecycle()
     val trunking by engine.trunking.collectAsStateWithLifecycle()
     val log by engine.log.collectAsStateWithLifecycle()
     val spectrum by engine.spectrum.collectAsStateWithLifecycle()
     var config by remember { mutableStateOf(initialConfig) }
+    // The waterfall keeps filling while other tabs are showing.
+    val waterfall = remember { WaterfallImage() }
+    LaunchedEffect(spectrum) { spectrum?.let(waterfall::push) }
+    val live: (RadioConfig) -> Unit = { updated ->
+        config = updated
+        onLiveChange(updated)
+    }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val now by produceState(SystemClock.elapsedRealtime()) {
         while (true) {
@@ -124,6 +139,7 @@ fun MainScreen(
                 now = now,
                 onStart = { onStart(config) },
                 onStop = onStop,
+                onLiveChange = live,
             )
             TabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background) {
                 listOf("Calls", "Log", "Spectrum", "Setup").forEachIndexed { index, title ->
@@ -133,7 +149,9 @@ fun MainScreen(
             when (tab) {
                 0 -> CallsTab(trunking, config.aliases)
                 1 -> LogTab(log)
-                2 -> SpectrumTab(spectrum, status.frequencyHz, status.centerHz, status.sampleRate)
+                2 -> SpectrumTab(spectrum, waterfall, status.frequencyHz, status.centerHz, status.sampleRate) { hz ->
+                    live(config.copy(frequencyHz = hz))
+                }
                 else -> SetupTab(config, onChange = { config = it }, onSave = { onSave(config) })
             }
         }
@@ -148,6 +166,7 @@ private fun StatusCard(
     now: Long,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onLiveChange: (RadioConfig) -> Unit,
 ) {
     val active = status.running || status.starting
     val frequency = if (active) status.frequencyHz else config.frequencyHz
@@ -212,9 +231,54 @@ private fun StatusCard(
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = Muted)
             }
+            Spacer(Modifier.height(4.dp))
+            QuickControls(config, onLiveChange)
         }
     }
 }
+
+/** RF gain and speaker volume, both in dB, applied immediately. */
+@Composable
+private fun QuickControls(config: RadioConfig, onLiveChange: (RadioConfig) -> Unit) {
+    var gainIndex by remember(config.gainTenthsDb) { mutableIntStateOf(gainIndexOf(config.gainTenthsDb)) }
+    var volume by remember(config.volumeDb) { mutableStateOf(config.volumeDb) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("RF", style = MaterialTheme.typography.labelMedium, color = Muted, modifier = Modifier.width(52.dp))
+        Slider(
+            value = gainIndex.toFloat(),
+            onValueChange = { gainIndex = it.roundToInt() },
+            onValueChangeFinished = { onLiveChange(config.copy(gainTenthsDb = gainFromIndex(gainIndex))) },
+            valueRange = -1f..IqSource.GAIN_STEPS.lastIndex.toFloat(),
+            steps = IqSource.GAIN_STEPS.size - 1,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            if (gainIndex < 0) "AGC" else "%.1f dB".format(IqSource.GAIN_STEPS[gainIndex] / 10.0),
+            style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace,
+            modifier = Modifier.width(64.dp),
+        )
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Volume", style = MaterialTheme.typography.labelMedium, color = Muted, modifier = Modifier.width(52.dp))
+        Slider(
+            value = volume,
+            onValueChange = { volume = it.roundToInt().toFloat() },
+            onValueChangeFinished = { onLiveChange(config.copy(volumeDb = volume)) },
+            valueRange = AudioOutput.MUTE_DB..12f,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            if (volume <= AudioOutput.MUTE_DB) "mute" else "%+.0f dB".format(volume),
+            style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace,
+            modifier = Modifier.width(64.dp),
+        )
+    }
+}
+
+private fun gainIndexOf(tenthsDb: Int): Int = if (tenthsDb == IqSource.AUTO_GAIN) -1 else
+    IqSource.GAIN_STEPS.indexOfFirst { it >= tenthsDb }.let { if (it < 0) IqSource.GAIN_STEPS.lastIndex else it }
+
+private fun gainFromIndex(index: Int): Int = if (index < 0) IqSource.AUTO_GAIN else IqSource.GAIN_STEPS[index]
 
 private fun siteLine(site: SiteInfo): String? {
     val parts = listOfNotNull(
@@ -389,25 +453,46 @@ private fun LogTab(log: List<LogLine>) {
 }
 
 @Composable
-private fun SpectrumTab(spectrum: FloatArray?, channelHz: Long, centerHz: Long, sampleRate: Int) {
+private fun SpectrumTab(
+    spectrum: FloatArray?,
+    waterfall: WaterfallImage,
+    channelHz: Long,
+    centerHz: Long,
+    sampleRate: Int,
+    onTune: (Long) -> Unit,
+) {
     if (spectrum == null || sampleRate == 0) {
         Text("Start the radio to see the spectrum around the channel.", modifier = Modifier.padding(20.dp), color = Muted)
     } else {
-        SpectrumPlot(spectrum, channelHz, centerHz, sampleRate)
+        SpectrumPlot(spectrum, waterfall, channelHz, centerHz, sampleRate, onTune)
     }
 }
 
+/** Spectrum line over a waterfall. Tapping either tunes the decoder there, snapped to a 6.25 kHz raster. */
 @Composable
-private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long, centerHz: Long, sampleRate: Int) {
+private fun SpectrumPlot(
+    spectrum: FloatArray,
+    waterfall: WaterfallImage,
+    channelHz: Long,
+    centerHz: Long,
+    sampleRate: Int,
+    onTune: (Long) -> Unit,
+) {
     Column(Modifier.fillMaxSize().padding(12.dp)) {
-        val sorted = spectrum.sorted()
-        val floor = sorted[sorted.size / 10] - 6f
-        val top = maxOf(sorted.last() + 6f, floor + 30f)
+        val floor = waterfall.floorDb - 4f
+        val top = waterfall.topDb + 4f
         val channelFraction = 0.5f + (channelHz - centerHz).toFloat() / sampleRate
         val lineColor = MaterialTheme.colorScheme.primary
+        val tap = Modifier.pointerInput(centerHz, sampleRate) {
+            detectTapGestures { position ->
+                val hz = centerHz + ((position.x / size.width) - 0.5) * sampleRate
+                onTune((hz / 6_250).roundToInt() * 6_250L)
+            }
+        }
         Canvas(
-            Modifier.fillMaxWidth().weight(1f)
-                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp)),
+            Modifier.fillMaxWidth().weight(0.4f)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                .then(tap),
         ) {
             val path = Path()
             spectrum.forEachIndexed { index, db ->
@@ -424,9 +509,21 @@ private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long, centerHz: Long, 
             drawLine(Muted.copy(alpha = 0.5f), Offset(size.width / 2, 0f), Offset(size.width / 2, size.height))
             drawPath(path, lineColor, style = Stroke(width = 2f))
         }
+        Canvas(Modifier.fillMaxWidth().weight(0.6f).then(tap)) {
+            waterfall.version // redraw on every new row
+            drawImage(
+                waterfall.image,
+                srcOffset = IntOffset.Zero,
+                srcSize = IntSize(waterfall.width, waterfall.height),
+                dstOffset = IntOffset.Zero,
+                dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
+            )
+            val channelX = size.width * channelFraction
+            drawLine(Amber.copy(alpha = 0.7f), Offset(channelX, 0f), Offset(channelX, size.height), strokeWidth = 1.5f)
+        }
         Spacer(Modifier.height(8.dp))
         Text(
-            "Amber: ${TrunkingTracker.mhz(channelHz)}. Grey: tuner centre (DC spike). " +
+            "Amber: ${TrunkingTracker.mhz(channelHz)}. Grey: tuner centre (DC spike). Tap to tune. " +
                 "Span %.2f MHz, %.0f to %.0f dBFS.".format(sampleRate / 1e6, floor, top),
             style = MaterialTheme.typography.bodySmall,
             color = Muted,

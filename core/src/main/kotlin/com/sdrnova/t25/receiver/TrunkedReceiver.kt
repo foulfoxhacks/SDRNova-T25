@@ -34,7 +34,7 @@ import kotlin.math.abs
 class TrunkedReceiver(
     val inputRate: Int,
     val centerHz: Long,
-    val controlHz: Long,
+    controlHz: Long,
     val mode: Mode,
     private val maxTrafficChannels: Int,
     private val listener: Listener,
@@ -84,6 +84,19 @@ class TrunkedReceiver(
 
     val tracker = TrunkingTracker(clock)
     val control: ChannelReceiver
+
+    /** The channel the main decoder listens to; [retune] moves it within the tuner's bandwidth. */
+    var controlHz: Long = controlHz
+        private set
+
+    /** Moves the main channel to [hz] without touching the tuner; false if it's outside the usable bandwidth. */
+    fun retune(hz: Long): Boolean {
+        if (abs(hz - centerHz) > usableHalfBandwidthHz) return false
+        controlHz = hz
+        control.channelOffsetHz = (hz - centerHz).toDouble()
+        for (channel in dmrCalls.values.toList()) release(channel, "retuned")
+        return true
+    }
     private val traffic = ArrayList<TrafficChannel>()
     private val carriers = HashMap<Long, Carrier>()
     private val dmrCalls = HashMap<Int, TrafficChannel>()

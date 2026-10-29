@@ -112,6 +112,27 @@ class RadioEngine(private val context: Context) {
         synchronized(lock) { session }?.shutdown()
     }
 
+    /** Applies tuner gain (tenths of a dB, or [IqSource.AUTO_GAIN]) to the running radio. */
+    fun setGain(tenthsDb: Int) {
+        val current = synchronized(lock) { session } ?: return
+        Thread({ runCatching { current.source?.setGain(tenthsDb) } }, "radio-gain").start()
+    }
+
+    fun setVolumeDb(db: Float) {
+        synchronized(lock) { session }?.setVolumeDb(db)
+    }
+
+    /** Moves the decoder to [hz] inside the current tuner bandwidth, without restarting. */
+    fun tune(hz: Long) {
+        synchronized(lock) { session }?.post { receiver ->
+            if (receiver.retune(hz)) {
+                _status.value = _status.value.copy(frequencyHz = hz, error = null)
+            } else {
+                _status.value = _status.value.copy(error = "${TrunkingTracker.mhz(hz)} is outside the tuner's bandwidth")
+            }
+        }
+    }
+
     private fun ended(ended: Session, error: String?) {
         synchronized(lock) { if (session === ended) session = null }
         _status.value = _status.value.copy(running = false, starting = false, error = error)
@@ -125,6 +146,7 @@ class RadioEngine(private val context: Context) {
         private val pool = ArrayBlockingQueue<Chunk>(80)
         private val analyzer = SpectrumAnalyzer(1024)
         private val logLines = ArrayDeque<LogLine>()
+        @Volatile
         private var audio: AudioOutput? = null
         private var vocoder: VocoderProvider? = null
         private val decoders = HashMap<Int, VoiceDecoder>()
@@ -136,7 +158,20 @@ class RadioEngine(private val context: Context) {
 
         @Volatile
         private var dropped = 0L
-        private var source: IqSource? = null
+
+        @Volatile
+        var source: IqSource? = null
+            private set
+        private val commands = java.util.concurrent.ConcurrentLinkedQueue<(TrunkedReceiver) -> Unit>()
+
+        /** Runs [command] on the DSP thread before the next block of samples. */
+        fun post(command: (TrunkedReceiver) -> Unit) {
+            commands.add(command)
+        }
+
+        fun setVolumeDb(db: Float) {
+            audio?.setVolumeDb(db)
+        }
 
         private var syncs = 0L
         private var messages = 0L
@@ -241,18 +276,20 @@ class RadioEngine(private val context: Context) {
             receiver.control.squelchThreshold = config.squelch
             if (config.mode == Mode.NBFM) audio = AudioOutput(receiver.control.channelRate).also { it.start() }
             if (vocoder != null) audio = AudioOutput(48_000).also { it.start() }
+            audio?.setVolumeDb(config.volumeDb)
 
             var floats = FloatArray(0)
             val publishEvery = iq.sampleRate / 4
             var sincePublish = 0
             var sinceSpectrum = 0
             while (running) {
+                while (true) commands.poll()?.invoke(receiver) ?: break
                 val chunk = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
                 if (floats.size < chunk.length) floats = FloatArray(chunk.length)
                 val samples = iq.format.toFloat(chunk.data, chunk.length, floats)
                 receiver.process(floats, samples)
                 sinceSpectrum += samples
-                if (sinceSpectrum >= iq.sampleRate / 8) {
+                if (sinceSpectrum >= iq.sampleRate / SPECTRUM_RATE) {
                     sinceSpectrum = 0
                     analyzer.compute(floats, samples)?.let { _spectrum.value = it }
                 }
@@ -385,6 +422,9 @@ class RadioEngine(private val context: Context) {
     companion object {
         private const val TAG = "RadioEngine"
         private val TALKGROUP = Regex("TG (\\d+)")
+
+        /** Spectrum (and waterfall) frames per second. */
+        private const val SPECTRUM_RATE = 12
 
         /** The tuner sits this far above the channel so the dongle's DC spike stays out of the channel filter. */
         const val TUNER_OFFSET_HZ = 150_000L

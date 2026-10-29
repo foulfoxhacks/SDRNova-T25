@@ -56,6 +56,13 @@ class MainActivity : ComponentActivity() {
                     initialConfig = store.load(),
                     onStart = ::start,
                     onStop = { RadioService.stop(this) },
+                    onLiveChange = { config ->
+                        val previous = store.load()
+                        store.save(config)
+                        if (config.gainTenthsDb != previous.gainTenthsDb) engine.setGain(config.gainTenthsDb)
+                        if (config.volumeDb != previous.volumeDb) engine.setVolumeDb(config.volumeDb)
+                        if (config.frequencyHz != previous.frequencyHz) engine.tune(config.frequencyHz)
+                    },
                     onSave = { config ->
                         store.save(config)
                         if (engine.status.value.running) {

@@ -15,6 +15,14 @@ class AudioOutput(private val sampleRate: Int = 48_000) {
     @Volatile
     private var running = false
 
+    /** Linear gain applied to every sample; 0 mutes. */
+    @Volatile
+    var gain = 1f
+
+    fun setVolumeDb(db: Float) {
+        gain = if (db <= MUTE_DB) 0f else Math.pow(10.0, db / 20.0).toFloat()
+    }
+
     fun start() {
         val minimum = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val audioTrack = AudioTrack.Builder()
@@ -45,9 +53,17 @@ class AudioOutput(private val sampleRate: Int = 48_000) {
         }, "audio-out").apply { start() }
     }
 
-    /** Copies and queues [count] samples; drops them if playback has fallen behind. */
+    /** Copies [count] samples at the current volume and queues them; drops them if playback has fallen behind. */
     fun write(samples: ShortArray, count: Int) {
-        if (running) queue.offer(samples.copyOf(count))
+        if (!running) return
+        val g = gain
+        val copy = ShortArray(count) { (samples[it] * g).coerceIn(-32767f, 32767f).toInt().toShort() }
+        queue.offer(copy)
+    }
+
+    companion object {
+        /** Volume at or below this is mute. */
+        const val MUTE_DB = -40f
     }
 
     fun stop() {

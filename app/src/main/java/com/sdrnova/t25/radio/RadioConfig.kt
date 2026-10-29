@@ -25,6 +25,8 @@ data class RadioConfig(
     val centerHz: Long = 0,
     /** Voice channels decoded alongside the control channel (0 turns following off). */
     val maxTrafficChannels: Int = 2,
+    /** Speaker volume in dB; [AudioOutput.MUTE_DB] or below is mute. */
+    val volumeDb: Float = 0f,
 ) {
     val effectiveCenterHz: Long get() = if (centerHz > 0) centerHz else frequencyHz + RadioEngine.TUNER_OFFSET_HZ
 
@@ -63,6 +65,7 @@ class ConfigStore(context: Context) {
             sampleRate = prefs.getInt("sampleRate", defaults.sampleRate),
             centerHz = prefs.getLong("center", defaults.centerHz),
             maxTrafficChannels = prefs.getInt("maxTraffic", defaults.maxTrafficChannels),
+            volumeDb = prefs.getFloat("volumeDb", defaults.volumeDb),
         )
     }
 
@@ -81,6 +84,7 @@ class ConfigStore(context: Context) {
             .putInt("sampleRate", config.sampleRate)
             .putLong("center", config.centerHz)
             .putInt("maxTraffic", config.maxTrafficChannels)
+            .putFloat("volumeDb", config.volumeDb)
             .apply()
     }
 }

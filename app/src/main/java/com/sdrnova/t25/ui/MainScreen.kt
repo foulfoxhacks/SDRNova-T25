@@ -84,9 +84,6 @@ fun MainScreen(
     onStart: (RadioConfig) -> Unit,
     onStop: () -> Unit,
     onSave: (RadioConfig) -> Unit,
-    vocoderName: String?,
-    onImportVocoder: () -> Unit,
-    onRemoveVocoder: () -> Unit,
 ) {
     val status by engine.status.collectAsStateWithLifecycle()
     val trunking by engine.trunking.collectAsStateWithLifecycle()
@@ -137,10 +134,7 @@ fun MainScreen(
                 0 -> CallsTab(trunking, config.aliases)
                 1 -> LogTab(log)
                 2 -> SpectrumTab(spectrum, status.frequencyHz, status.centerHz, status.sampleRate)
-                else -> SetupTab(
-                    config, onChange = { config = it }, onSave = { onSave(config) },
-                    vocoderName = vocoderName, onImportVocoder = onImportVocoder, onRemoveVocoder = onRemoveVocoder,
-                )
+                else -> SetupTab(config, onChange = { config = it }, onSave = { onSave(config) })
             }
         }
     }
@@ -441,14 +435,7 @@ private fun SpectrumPlot(spectrum: FloatArray, channelHz: Long, centerHz: Long, 
 }
 
 @Composable
-private fun SetupTab(
-    config: RadioConfig,
-    onChange: (RadioConfig) -> Unit,
-    onSave: () -> Unit,
-    vocoderName: String?,
-    onImportVocoder: () -> Unit,
-    onRemoveVocoder: () -> Unit,
-) {
+private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSave: () -> Unit) {
     var frequencyText by remember { mutableStateOf("%.5f".format(config.frequencyHz / 1e6)) }
     var centerText by remember { mutableStateOf(if (config.centerHz > 0) "%.5f".format(config.centerHz / 1e6) else "") }
     var portText by remember { mutableStateOf(config.port.toString()) }
@@ -592,19 +579,6 @@ private fun SetupTab(
             minLines = 4,
             modifier = Modifier.fillMaxWidth(),
         )
-
-        Label("Voice codec (IMBE)")
-        Text(
-            vocoderName?.let { "Installed: $it" }
-                ?: "None installed. SDRNova T25 ships without a vocoder, so P25 calls are followed and logged " +
-                "without audio. Import a provider jar you built yourself; see docs/VOCODER.md in the repository.",
-            style = MaterialTheme.typography.bodySmall,
-            color = if (vocoderName != null) Good else Muted,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onImportVocoder) { Text("Import provider jar") }
-            if (vocoderName != null) Button(onClick = onRemoveVocoder) { Text("Remove") }
-        }
 
         Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         Text(

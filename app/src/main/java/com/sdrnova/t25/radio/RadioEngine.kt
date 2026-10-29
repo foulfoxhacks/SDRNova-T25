@@ -166,7 +166,7 @@ class RadioEngine(private val context: Context) {
                 iq.setCenterFrequency(config.effectiveCenterHz)
                 if (!running) return
 
-                if (config.mode != Mode.NBFM) vocoder = VocoderLoader.load(context)
+                if (config.mode != Mode.NBFM) vocoder = VocoderLoader.provider
                 _status.value = _status.value.copy(
                     running = true, starting = false, source = iq.description, vocoder = vocoder?.name,
                 )

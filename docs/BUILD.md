@@ -34,7 +34,8 @@ output somewhere short:
 | Module | What it holds |
 | --- | --- |
 | `core` | Plain Kotlin/JVM: filters, mixer, FFT, C4FM demodulator, P25 Phase 1 framing and FEC, TSBK parsing, trunking tracker, NBFM. Unit-tested on the desktop. |
-| `app` | Android: RTL2832U + R820T/R828D USB driver, `rtl_tcp` client, radio engine threads, foreground service, Compose UI. |
+| `vocoder` | JMBE (GPL-3.0) IMBE and AMBE+2 voice codecs, Java, adapted for Android. Unit-tested on the desktop. |
+| `app` | Android: RTL-SDR, HackRF and Airspy USB drivers, `rtl_tcp` client, radio engine threads, foreground service, Compose UI. |
 
 ## What works in this build
 
@@ -47,7 +48,7 @@ output somewhere short:
 - LDU1/LDU2 decoding: IMBE voice frames, link control (talkgroup and radio ID, Hamming(10,6) + Reed-Solomon(24,12,13)), encryption sync (algorithm and key ID, Reed-Solomon(24,16,9)); TDU/TDULC end calls
 - P25 Phase 2 TDMA voice channels: grants on 2-slot TDMA bands are followed per timeslot. H-DQPSK demodulation, superframe fragments, ISCH, the WACN/system/NAC scrambling sequence, FACCH/SACCH (RS(63,35) + CRC-12) MAC PDUs (PTT, END PTT, voice channel user) and AMBE+2 voice frames; both timeslots of a carrier share one demodulator
 - DMR on a single frequency (repeater or direct mode): BS/MS/direct syncs, CACH timeslots, slot type (Golay 20,8), BPTC(196,96), voice LC headers and terminators (RS(12,9) checked) giving talkgroup and radio ID per timeslot, CSBKs (CRC checked; Tier III grants logged with their LCN), idle bursts, and AMBE+2 voice frames from all six bursts of each superframe
-- Voice audio through a `VocoderProvider` you supply (IMBE for Phase 1, AMBE+2 for Phase 2 and DMR); see [VOCODER.md](VOCODER.md)
+- Voice audio from the built-in JMBE vocoder (IMBE for Phase 1, AMBE+2 for Phase 2 and DMR); see [VOCODER.md](VOCODER.md)
 - Analog NBFM with noise squelch and audio
 - Spectrum view of the tuner bandwidth
 

@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "SDRNovaT25"
 
-include(":core", ":app")
+include(":core", ":vocoder", ":app")

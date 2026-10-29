@@ -56,7 +56,7 @@ Optional Libs:
 
 Vocoder note:
 --------
-P25 and DMR voice use IMBE and AMBE+2. These are patent-encumbered and no decoder is bundled with this repository. T25 exposes a `VocoderProvider` interface; builds without a provider decode control traffic, metadata, and call events but produce no voice audio. Supplying a provider is the user's responsibility and their jurisdiction's problem, not the project's.
+P25 and DMR voice use IMBE and AMBE+2. SDRNova T25 builds in [JMBE](https://github.com/DSheirer/jmbe) (GPL-3.0), the vocoder sdrtrunk uses, from the `vocoder` module; see [docs/VOCODER.md](docs/VOCODER.md). Both codecs are patent-encumbered in some jurisdictions. Whether you may use or distribute a decoder is your jurisdiction's question to answer.
 
 Hardware support:
 --------

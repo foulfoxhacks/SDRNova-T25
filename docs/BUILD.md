@@ -46,7 +46,8 @@ output somewhere short:
 - Traffic channel following: up to four voice channels decoded alongside the control channel, as long as they sit inside the tuner's bandwidth (like sdrtrunk with a single tuner)
 - LDU1/LDU2 decoding: IMBE voice frames, link control (talkgroup and radio ID, Hamming(10,6) + Reed-Solomon(24,12,13)), encryption sync (algorithm and key ID, Reed-Solomon(24,16,9)); TDU/TDULC end calls
 - P25 Phase 2 TDMA voice channels: grants on 2-slot TDMA bands are followed per timeslot. H-DQPSK demodulation, superframe fragments, ISCH, the WACN/system/NAC scrambling sequence, FACCH/SACCH (RS(63,35) + CRC-12) MAC PDUs (PTT, END PTT, voice channel user) and AMBE+2 voice frames; both timeslots of a carrier share one demodulator
-- Voice audio through a `VocoderProvider` you supply (IMBE for Phase 1, AMBE+2 for Phase 2); see [VOCODER.md](VOCODER.md)
+- DMR on a single frequency (repeater or direct mode): BS/MS/direct syncs, CACH timeslots, slot type (Golay 20,8), BPTC(196,96), voice LC headers and terminators (RS(12,9) checked) giving talkgroup and radio ID per timeslot, CSBKs (CRC checked; Tier III grants logged with their LCN), idle bursts, and AMBE+2 voice frames from all six bursts of each superframe
+- Voice audio through a `VocoderProvider` you supply (IMBE for Phase 1, AMBE+2 for Phase 2 and DMR); see [VOCODER.md](VOCODER.md)
 - Analog NBFM with noise squelch and audio
 - Spectrum view of the tuner bandwidth
 

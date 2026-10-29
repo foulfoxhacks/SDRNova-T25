@@ -1,5 +1,8 @@
 package com.sdrnova.t25.receiver
 
+import com.sdrnova.t25.dmr.DmrEvent
+import com.sdrnova.t25.dmr.DmrFramer
+import com.sdrnova.t25.dmr.DmrSync
 import com.sdrnova.t25.dsp.ComplexFirDecimator
 import com.sdrnova.t25.dsp.FirDesign
 import com.sdrnova.t25.dsp.Mixer
@@ -20,6 +23,7 @@ import kotlin.math.sqrt
 
 enum class Mode(val label: String, val selectable: Boolean = true) {
     P25_PHASE1("P25 Phase 1"),
+    DMR("DMR"),
     NBFM("Analog NBFM"),
 
     /** Phase 2 TDMA voice carriers, reached by following grants from a Phase 1 control channel. */
@@ -39,6 +43,7 @@ class ChannelReceiver(
     interface Listener {
         fun onP25Event(event: P25Event) {}
         fun onPhase2Event(event: Phase2Event) {}
+        fun onDmrEvent(event: DmrEvent) {}
         fun onAudio(samples: ShortArray, count: Int) {}
     }
 
@@ -51,6 +56,12 @@ class ChannelReceiver(
     private val nbfm = NbfmDemodulator(channelRate)
     private val phase2Framer = P25P2Framer(::onPhase2Event)
     private val dqpsk = DqpskDemodulator(channelRate.toDouble(), phase2Framer)
+    private val dmrFramer = DmrFramer(::onDmrEvent)
+
+    /** DMR is 4-level FSK at 4800 baud too; bursts start 66 dibits before their sync, so history is replayed. */
+    private val dmrDemodulator = C4fmDemodulator(
+        channelRate.toDouble(), dmrFramer, DmrSync.DIBITS, allowInverted = false, backlogSymbols = 160,
+    )
     private var work = FloatArray(0)
     private var converted = FloatArray(0)
     private var audio = ShortArray(0)
@@ -103,6 +114,7 @@ class ChannelReceiver(
         }
         val (pass, stop) = when (mode) {
             Mode.P25_PHASE1 -> 5_200.0 to 6_500.0
+            Mode.DMR -> 5_800.0 to 7_500.0
             Mode.NBFM -> 6_000.0 to 8_500.0
             // H-DQPSK at 6000 baud with alpha 0.2 occupies ±3.6 kHz; the RRC matched filter does the rest.
             Mode.P25_PHASE2 -> 4_800.0 to 6_500.0
@@ -133,6 +145,7 @@ class ChannelReceiver(
         when (mode) {
             Mode.P25_PHASE1 -> demodulator.process(work, count)
             Mode.P25_PHASE2 -> dqpsk.process(work, count)
+            Mode.DMR -> dmrDemodulator.process(work, count)
             Mode.NBFM -> {
                 if (audio.size < count) audio = ShortArray(count)
                 nbfm.process(work, count, audio)
@@ -148,6 +161,14 @@ class ChannelReceiver(
             updateMixer()
         }
         listener.onP25Event(event)
+    }
+
+    private fun onDmrEvent(event: DmrEvent) {
+        if (event is DmrEvent.Sync) {
+            afcHz = (afcHz + 0.5 * event.frequencyErrorHz).coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
+            updateMixer()
+        }
+        listener.onDmrEvent(event)
     }
 
     private fun onPhase2Event(event: Phase2Event) {

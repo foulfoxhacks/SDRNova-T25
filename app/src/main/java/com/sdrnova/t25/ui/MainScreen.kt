@@ -162,8 +162,8 @@ private fun StatusCard(
     val (dot, label) = when {
         status.starting -> Amber to "Starting…"
         status.running && mode == Mode.NBFM -> Good to "Listening"
-        status.running && locked -> Good to "Control channel locked"
-        status.running -> Amber to "Searching for P25 sync"
+        status.running && locked -> Good to if (mode == Mode.DMR) "DMR signal locked" else "Control channel locked"
+        status.running -> Amber to if (mode == Mode.DMR) "Searching for DMR sync" else "Searching for P25 sync"
         else -> Muted to "Stopped"
     }
 
@@ -282,7 +282,7 @@ private fun FollowedRow(call: FollowedCall, aliases: Map<Int, String>) {
     val details = buildList {
         if (alias != null) add("TG ${call.talkgroup}")
         add(TrunkingTracker.mhz(call.frequencyHz))
-        call.timeslot?.let { add("Phase 2 TS$it") }
+        call.timeslot?.let { add("TS$it") }
         call.source?.let { add("from $it") }
     }.joinToString(" · ")
     Row(
@@ -464,7 +464,7 @@ private fun SetupTab(
                 frequencyText = text
                 text.toDoubleOrNull()?.takeIf { it in 24.0..1766.0 }?.let { onChange(config.copy(frequencyHz = (it * 1e6).roundToInt().toLong())) }
             },
-            label = { Text("Frequency (MHz) — the control channel for P25") },
+            label = { Text("Frequency (MHz): P25 control channel, or the DMR/NBFM channel") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             modifier = Modifier.fillMaxWidth(),

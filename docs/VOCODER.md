@@ -1,7 +1,7 @@
 # Voice audio (IMBE and AMBE+2)
 
-P25 Phase 1 voice is IMBE-coded and Phase 2 voice is AMBE+2 (half rate). Both are patent-encumbered, so SDRNova T25
-ships without a decoder. Without one
+P25 Phase 1 voice is IMBE-coded; P25 Phase 2 and DMR voice are AMBE+2 (half rate). Both codecs are
+patent-encumbered, so SDRNova T25 ships without a decoder. Without one
 the app still follows calls onto their voice channels and logs the talkgroup, the radio ID and whether the call is
 encrypted, but it plays no audio.
 

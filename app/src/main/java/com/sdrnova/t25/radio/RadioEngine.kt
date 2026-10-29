@@ -4,6 +4,7 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import android.os.SystemClock
 import android.util.Log
+import com.sdrnova.t25.dmr.DmrEvent
 import com.sdrnova.t25.dsp.SpectrumAnalyzer
 import com.sdrnova.t25.p25.IdentifierUpdate
 import com.sdrnova.t25.p25.Ldu
@@ -165,7 +166,7 @@ class RadioEngine(private val context: Context) {
                 iq.setCenterFrequency(config.effectiveCenterHz)
                 if (!running) return
 
-                if (config.mode == Mode.P25_PHASE1) vocoder = VocoderLoader.load(context)
+                if (config.mode != Mode.NBFM) vocoder = VocoderLoader.load(context)
                 _status.value = _status.value.copy(
                     running = true, starting = false, source = iq.description, vocoder = vocoder?.name,
                 )
@@ -173,7 +174,7 @@ class RadioEngine(private val context: Context) {
                     "Listening on ${TrunkingTracker.mhz(config.frequencyHz)} (${config.mode.label}) via ${iq.description}, " +
                         "%.2f MS/s".format(iq.sampleRate / 1e6),
                 )
-                if (config.mode == Mode.P25_PHASE1) {
+                if (config.mode != Mode.NBFM) {
                     addLog(vocoder?.let { "Voice audio through ${it.name}" } ?: "No vocoder installed: calls are followed without audio")
                 }
 
@@ -277,6 +278,13 @@ class RadioEngine(private val context: Context) {
                 }
             }
 
+            override fun onDmrEvent(event: DmrEvent) {
+                if (event is DmrEvent.Sync) {
+                    syncs++
+                    lastSyncAt = SystemClock.elapsedRealtime()
+                }
+            }
+
             override fun onLog(text: String) = addLog(withAliases(text))
 
             override fun onAudio(samples: ShortArray, count: Int) {
@@ -285,7 +293,8 @@ class RadioEngine(private val context: Context) {
 
             override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
                 val slot = channel.timeslot?.let { " TDMA slot $it" } ?: ""
-                addLog(withAliases("Following ${label(channel)} on ${TrunkingTracker.mhz(channel.frequencyHz)}$slot"))
+                val verb = if (config.mode == Mode.DMR) "Call" else "Following"
+                addLog(withAliases("$verb ${label(channel)} on ${TrunkingTracker.mhz(channel.frequencyHz)}$slot"))
             }
 
             override fun onTrafficVoice(channel: TrunkedReceiver.TrafficChannel, ldu: Ldu) =

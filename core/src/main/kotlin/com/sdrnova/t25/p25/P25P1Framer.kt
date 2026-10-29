@@ -49,7 +49,7 @@ class P25P1Framer(private val listener: (P25Event) -> Unit) : C4fmDemodulator.Si
         State.TSDU -> lastBlockFailed
     }
 
-    override fun onSync(bitErrors: Int, frequencyErrorHz: Double) {
+    override fun onSync(pattern: Int, bitErrors: Int, frequencyErrorHz: Double) {
         listener(P25Event.Sync(bitErrors, frequencyErrorHz))
         state = State.NID
         frameDibit = 24

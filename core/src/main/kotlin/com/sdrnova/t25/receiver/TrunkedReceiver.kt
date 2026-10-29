@@ -1,5 +1,7 @@
 package com.sdrnova.t25.receiver
 
+import com.sdrnova.t25.dmr.Dmr
+import com.sdrnova.t25.dmr.DmrEvent
 import com.sdrnova.t25.p25.CallTermination
 import com.sdrnova.t25.p25.Channel
 import com.sdrnova.t25.p25.GroupVoiceGrant
@@ -45,8 +47,9 @@ class TrunkedReceiver(
         fun onTrafficStart(channel: TrafficChannel) {}
         fun onTrafficVoice(channel: TrafficChannel, ldu: Ldu) {}
 
-        /** Phase 2: raw 72-bit AMBE+2 frames from one timeslot. */
+        /** Phase 2 or DMR: raw 72-bit AMBE+2 frames from one timeslot. */
         fun onTrafficAmbe(channel: TrafficChannel, frames: List<ByteArray>) {}
+        fun onDmrEvent(event: DmrEvent) {}
         fun onTrafficEnd(channel: TrafficChannel, reason: String) {}
     }
 
@@ -83,6 +86,7 @@ class TrunkedReceiver(
     val control: ChannelReceiver
     private val traffic = ArrayList<TrafficChannel>()
     private val carriers = HashMap<Long, Carrier>()
+    private val dmrCalls = HashMap<Int, TrafficChannel>()
     private val notices = HashMap<String, Long>()
     private val cooldownUntil = HashMap<Long, Long>()
     private var samplesProcessed = 0L
@@ -98,6 +102,7 @@ class TrunkedReceiver(
     init {
         control = ChannelReceiver(inputRate, mode, object : ChannelReceiver.Listener {
             override fun onP25Event(event: P25Event) = onControl(event)
+            override fun onDmrEvent(event: DmrEvent) = onDmr(event)
             override fun onAudio(samples: ShortArray, count: Int) = listener.onAudio(samples, count)
         })
         control.channelOffsetHz = (controlHz - centerHz).toDouble()
@@ -201,6 +206,48 @@ class TrunkedReceiver(
         listener.onTrafficStart(channel)
     }
 
+    /**
+     * DMR on the monitored frequency: each timeslot is a call that opens on its voice header (or, joining late, on
+     * voice alone) and closes on its terminator. CSBKs are logged; trunked DMR following needs a channel map first.
+     */
+    private fun onDmr(event: DmrEvent) {
+        listener.onDmrEvent(event)
+        val slot = event.timeslot
+        when (event) {
+            is DmrEvent.LinkControl -> {
+                val lc = event.lc
+                if (!lc.isVoice) return
+                val existing = dmrCalls[slot]
+                if (event.terminator) {
+                    existing?.let { release(it, "end of transmission") }
+                    return
+                }
+                val channel = existing ?: startDmrCall(slot, lc.target, lc.privateCall)
+                channel.talkgroup = lc.target
+                if (lc.source != 0) channel.source = lc.source
+                if (lc.options.encrypted) channel.encrypted = true
+                channel.lastActivityMs = streamTimeMs
+            }
+            is DmrEvent.Voice -> {
+                val channel = dmrCalls[slot] ?: startDmrCall(slot, 0, false)
+                channel.lastActivityMs = streamTimeMs
+                channel.voiceFrames += event.frames.size
+                if (!channel.encrypted) listener.onTrafficAmbe(channel, event.frames)
+            }
+            is DmrEvent.Csbk -> listener.onLog("DMR TS$slot CC${event.colorCode}: ${Dmr.describe(event)}")
+            else -> Unit
+        }
+    }
+
+    private fun startDmrCall(slot: Int, target: Int, privateCall: Boolean): TrafficChannel {
+        val channel = TrafficChannel(nextId++, controlHz, slot, privateCall, target, null, streamTimeMs)
+        channel.receiver = control
+        dmrCalls[slot] = channel
+        traffic += channel
+        listener.onTrafficStart(channel)
+        return channel
+    }
+
     private fun onPhase2(frequency: Long, event: Phase2Event) {
         val carrier = carriers[frequency] ?: return
         val channel = carrier.channels[event.channel] ?: return
@@ -260,6 +307,7 @@ class TrunkedReceiver(
     private fun release(channel: TrafficChannel, reason: String) {
         if (traffic.remove(channel)) {
             cooldownUntil[cooldownKey(channel.frequencyHz, channel.timeslot)] = streamTimeMs + COOLDOWN_MS
+            channel.timeslot?.let { slot -> if (dmrCalls[slot] === channel) dmrCalls.remove(slot) }
             channel.timeslot?.let { slot ->
                 val carrier = carriers[channel.frequencyHz]
                 carrier?.channels?.remove(slot)

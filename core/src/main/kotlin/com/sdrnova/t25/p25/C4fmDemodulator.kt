@@ -15,10 +15,19 @@ import kotlin.math.roundToInt
  * ±3π/4. Every sample is correlated against the 24-symbol frame sync; a confirmed sync fixes the symbol timing, the
  * DC balance (carrier offset) and the gain. Between syncs a Gardner detector keeps the symbol clock aligned.
  */
-class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
+class C4fmDemodulator(
+    sampleRate: Double,
+    private val sink: Sink,
+    /** 24-dibit sync patterns to search for; the index of the one found is passed to [Sink.onSync]. */
+    syncPatterns: List<IntArray> = listOf(P25.SYNC_DIBITS),
+    /** Accept a sync with every symbol negated. Off for DMR, whose voice and data syncs are each other's inverse. */
+    private val allowInverted: Boolean = true,
+    /** Symbols of history to replay on first lock, for protocols whose bursts start before their sync (DMR). */
+    private val backlogSymbols: Int = 0,
+) {
     interface Sink {
-        /** A frame sync ended at the most recent symbol. [frequencyErrorHz] is the carrier offset measured on it. */
-        fun onSync(bitErrors: Int, frequencyErrorHz: Double)
+        /** Sync [pattern] ended at the most recent symbol. [frequencyErrorHz] is the carrier offset measured on it. */
+        fun onSync(pattern: Int, bitErrors: Int, frequencyErrorHz: Double)
 
         fun onDibit(dibit: Int)
 
@@ -35,6 +44,10 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
     private var sinceDumpRefresh = 0
 
     private val syncOffsets = IntArray(24) { ((23 - it) * samplesPerSymbol).roundToInt() }
+    private val patternDibits = syncPatterns
+    private val patternSymbols = syncPatterns.map { pattern -> FloatArray(24) { P25.idealPhase(pattern[it]) } }
+    private var candidatePattern = 0
+    private var lastSync = 0L
     private val ring: FloatArray
     private val ringMask: Long
     private var sampleIndex = 0L
@@ -55,7 +68,7 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
 
     init {
         var size = 64
-        while (size < syncOffsets[0] + 4 * dumpLength + 64) size = size shl 1
+        while (size < syncOffsets[0] + (backlogSymbols + 4) * samplesPerSymbol + 4 * dumpLength + 64) size = size shl 1
         ring = FloatArray(size)
         ringMask = (size - 1).toLong()
     }
@@ -87,6 +100,7 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
 
             val n = sampleIndex++
             ring[(n and ringMask).toInt()] = dumpSum * dumpScale
+            if (backlogSymbols > 0 && locked && n - lastSync > UNLOCK_SYMBOLS * samplesPerSymbol) locked = false
             if (locked) clockSymbols(n)
             if (n >= syncOffsets[0] + 1) searchSync(n)
         }
@@ -116,10 +130,12 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
         }
     }
 
-    private fun correlate(end: Long): Float {
+    private fun correlate(end: Long, pattern: Int): Float {
+        val symbols = patternSymbols[pattern]
         var score = 0f
-        for (k in 0 until 24) score += P25.SYNC_SYMBOLS[k] * ring[((end - syncOffsets[k]) and ringMask).toInt()]
-        return score
+        for (k in 0 until 24) score += symbols[k] * ring[((end - syncOffsets[k]) and ringMask).toInt()]
+        // Magnitude when inverted signals are allowed, so a negated sync is still found.
+        return if (allowInverted) abs(score) else score
     }
 
     private fun searchSync(n: Long) {
@@ -127,21 +143,24 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
             val peak = candidateIndex
             candidateIndex = -1
             candidateScore = 0f
-            confirm(peak)
+            confirm(peak, candidatePattern)
         }
         if (n < holdoffUntil || !sink.isSyncAllowed()) return
-        // Magnitude, so an inverted signal (negative correlation) is still found.
-        val score = abs(correlate(n))
-        if (score > SYNC_THRESHOLD && score > candidateScore) {
-            candidateScore = score
-            candidateIndex = n
+        for (pattern in patternSymbols.indices) {
+            val score = correlate(n, pattern)
+            if (score > SYNC_THRESHOLD && score > candidateScore) {
+                candidateScore = score
+                candidateIndex = n
+                candidatePattern = pattern
+            }
         }
     }
 
-    private fun confirm(peak: Long) {
-        val left = abs(correlate(peak - 1))
-        val center = abs(correlate(peak))
-        val right = abs(correlate(peak + 1))
+    private fun confirm(peak: Long, pattern: Int) {
+        val symbols = patternSymbols[pattern]
+        val left = correlate(peak - 1, pattern)
+        val center = correlate(peak, pattern)
+        val right = correlate(peak + 1, pattern)
         val curvature = left - 2 * center + right
         val offset = if (curvature < 0f) (0.5f * (left - right) / curvature).coerceIn(-0.5f, 0.5f) else 0f
         val end = peak + offset.toDouble()
@@ -154,7 +173,7 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
         for (k in 0 until 24) {
             val value = sampleAt(end - (23 - k) * samplesPerSymbol)
             values[k] = value
-            if (P25.SYNC_SYMBOLS[k] > 0) {
+            if (symbols[k] > 0) {
                 plus += value
                 plusCount++
             } else {
@@ -170,20 +189,28 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
         // A negative gain undoes an inverted signal.
         val newGain = P25.OUTER_PHASE / spread
         if (abs(newGain) !in 0.5f..2f) return
+        if (!allowInverted && newGain < 0) return
 
         var bitErrors = 0
         for (k in 0 until 24) {
-            bitErrors += (P25.slice((values[k] - newBalance) * newGain) xor P25.SYNC_DIBITS[k]).countOneBits()
+            bitErrors += (P25.slice((values[k] - newBalance) * newGain) xor patternDibits[pattern][k]).countOneBits()
         }
         if (bitErrors > MAX_SYNC_BIT_ERRORS) return
 
         balance = newBalance
         gain = newGain
         lastSoft = (values[23] - balance) * gain
+        holdoffUntil = peak + (4 * samplesPerSymbol).toLong()
+        lastSync = peak
+        if (!locked && backlogSymbols > 0) {
+            // First lock: replay the history (sync included) so the framer gets what preceded the sync.
+            val oldest = sampleIndex - ring.size + 2
+            val available = ((end - oldest) / samplesPerSymbol).toInt().coerceIn(23, backlogSymbols)
+            for (k in available downTo 0) sink.onDibit(P25.slice((sampleAt(end - k * samplesPerSymbol) - balance) * gain))
+        }
         nextSymbolTime = end + samplesPerSymbol
         locked = true
-        holdoffUntil = peak + (4 * samplesPerSymbol).toLong()
-        sink.onSync(bitErrors, balance * P25.SYMBOL_RATE / (2 * PI))
+        sink.onSync(pattern, bitErrors, balance * P25.SYMBOL_RATE / (2 * PI))
     }
 
     private companion object {
@@ -193,5 +220,7 @@ class C4fmDemodulator(sampleRate: Double, private val sink: Sink) {
         const val MIN_SYNC_SPREAD = 0.5f
         const val TIMING_GAIN = 0.01
         const val BALANCE_TRACKING = 0.002f
+        /** Without a sync for this long (when replaying history) the next sync counts as a first lock. */
+        const val UNLOCK_SYMBOLS = 4000
     }
 }

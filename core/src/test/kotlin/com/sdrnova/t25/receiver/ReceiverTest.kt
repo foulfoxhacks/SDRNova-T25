@@ -5,12 +5,14 @@ import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.p25.SignalGenerator
 import com.sdrnova.t25.p25.TsbkBuilder
 import com.sdrnova.t25.p25.TsbkMessage
+import com.sdrnova.t25.p25.phase2.Phase2Generator
 import com.sdrnova.t25.trunking.TrunkingTracker
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.util.Random
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -41,7 +43,7 @@ class ReceiverTest {
         .set(16, 8, 0x01).set(28, 12, 0x3AB).set(40, 8, 2).set(48, 8, 7).set(56, 4, 1).set(60, 12, 8)
         .build()
 
-    private fun run(bytes: ByteArray, mode: Mode = Mode.P25_PHASE1, chunk: Int = 32_768): Result {
+    private fun run(bytes: ByteArray, mode: Mode = Mode.P25_PHASE1, chunk: Int = 32_768, simulcast: Boolean = false): Result {
         val result = Result()
         val receiver = ChannelReceiver(inputRate, mode, object : ChannelReceiver.Listener {
             override fun onP25Event(event: P25Event) {
@@ -58,6 +60,7 @@ class ReceiverTest {
             }
         })
         receiver.channelOffsetHz = channelOffset
+        receiver.simulcast = simulcast
         var offset = 0
         while (offset < bytes.size) {
             val length = minOf(chunk, bytes.size - offset)
@@ -114,6 +117,20 @@ class ReceiverTest {
         assertEquals(7, tracker.site.site)
     }
 
+    @Test
+    fun `decodes a simulcast LSM control channel`() {
+        // Differential detection can't tell offsets beyond half the symbol rate apart, so stay inside ±2.4 kHz.
+        for (offset in listOf(300.0, -1_800.0)) {
+            val random = Random(9)
+            val (dibits, sent) = controlChannel(frames = 30, random = random)
+            val signal = Phase2Generator.modulate(dibits, inputRate, channelOffset + offset, symbolRate = 4800)
+            val iq = SignalGenerator.combine(listOf(signal), inputRate, snrDb = 18.0, amplitude = 0.25, random = random)
+            val result = run(iq, simulcast = true)
+            println("LSM $offset Hz: syncs=${result.syncs} messages=${result.messages.size}/$sent crcFailures=${result.crcFailures} afc=${result.afcHz}")
+            assertTrue(result.messages.size >= sent - 6, "decoded ${result.messages.size} of $sent TSBKs at $offset Hz")
+            assertTrue(abs(result.afcHz - offset) < 100, "AFC should settle on $offset Hz, got ${result.afcHz}")
+        }
+    }
     @Test
     fun `decodes at lower SNR`() {
         val random = Random(5)

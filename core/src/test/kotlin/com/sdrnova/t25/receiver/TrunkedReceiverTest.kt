@@ -39,8 +39,16 @@ class TrunkedReceiverTest {
         return bits
     }
 
-    @Test
-    fun `follows a voice grant onto a second channel in the same tuner window`() {
+    private class FollowResult(
+        val started: List<TrunkedReceiver.TrafficChannel>,
+        val voice: List<Ldu>,
+        val ended: List<String>,
+        val log: List<String>,
+        val frames: List<ByteArray>,
+    )
+
+    /** A control channel granting TG 1234 a voice channel, and that voice channel carrying the call. */
+    private fun follow(policy: CallPolicy = CallPolicy.ALL): FollowResult {
         val random = Random(21)
         val control = ArrayList<Int>()
         repeat(60) { control += random.nextInt(4) }
@@ -93,6 +101,7 @@ class TrunkedReceiverTest {
 
                 override fun onControlEvent(event: P25Event) = Unit
             })
+        receiver.policy = policy
 
         val floats = FloatArray(32_768)
         var offset = 0
@@ -103,7 +112,16 @@ class TrunkedReceiverTest {
             offset += length
         }
         println("started=${started.size} voice=${voice.size} ended=$ended log=${log.take(4)}")
+        return FollowResult(started, voice, ended, log, frames)
+    }
 
+    @Test
+    fun `follows a voice grant onto a second channel in the same tuner window`() {
+        val result = follow()
+        val started = result.started
+        val voice = result.voice
+        val ended = result.ended
+        val frames = result.frames
         assertEquals(1, started.size, "one traffic channel should open")
         assertEquals(trafficHz, started[0].frequencyHz)
         assertEquals(1234, started[0].talkgroup)
@@ -114,6 +132,15 @@ class TrunkedReceiverTest {
         assertEquals(false, voice.first { it.duid == P25.DUID_LDU2 }.encryption!!.encrypted)
         assertArrayEquals(frames[4], voice.first().voiceFrames[4])
         assertEquals(listOf("end of transmission"), ended)
+    }
+
+    @Test
+    fun `does not follow a locked-out talkgroup`() {
+        val result = follow(object : CallPolicy {
+            override fun follow(talkgroup: Int, unitToUnit: Boolean) = talkgroup != 1234
+        })
+        assertEquals(0, result.started.size)
+        assertTrue(result.log.any { "locked out" in it }, "log: ${result.log}")
     }
 
     @Test

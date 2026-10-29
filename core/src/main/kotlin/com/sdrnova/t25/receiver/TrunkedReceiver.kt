@@ -85,6 +85,9 @@ class TrunkedReceiver(
     val tracker = TrunkingTracker(clock)
     val control: ChannelReceiver
 
+    /** Lockouts and priorities, usually from the alias list. */
+    var policy: CallPolicy = CallPolicy.ALL
+
     /** The channel the main decoder listens to; [retune] moves it within the tuner's bandwidth. */
     var controlHz: Long = controlHz
         private set
@@ -109,6 +112,14 @@ class TrunkedReceiver(
 
     /** Channels this far from the tuner centre are inside the anti-alias filters with room for a 12.5 kHz signal. */
     val usableHalfBandwidthHz: Long = (inputRate * 0.42).toLong()
+
+    /** LSM (CQPSK) demodulation for a simulcast site, on the control channel and every voice channel it grants. */
+    var simulcast: Boolean
+        get() = control.simulcast
+        set(value) {
+            control.simulcast = value
+            for (channel in traffic) if (channel.timeslot == null) channel.receiver.simulcast = value
+        }
 
     val streamTimeMs: Long get() = samplesProcessed * 1000 / inputRate
 
@@ -202,15 +213,28 @@ class TrunkedReceiver(
             timeslot != null && scrambleParameters() == null -> notice(
                 "scramble", "Waiting for the network status broadcast (WACN and system) before following Phase 2 calls",
             )
+            !policy.follow(id, unitToUnit) -> notice("lock-$id", "$label is locked out; not following")
             encrypted -> notice("enc-$id", "$label is encrypted; not following")
             abs(frequency - centerHz) > usableHalfBandwidthHz -> notice(
                 "range-$frequency",
                 "$label on ${TrunkingTracker.mhz(frequency)} is outside the tuner's ±${usableHalfBandwidthHz / 1000} kHz",
             )
-            traffic.size >= maxTrafficChannels -> notice("busy-$id", "$label missed: all $maxTrafficChannels voice channels busy")
+            followed().size >= maxTrafficChannels -> {
+                // All busy: take the least important call's channel if this one outranks it.
+                val weakest = followed().maxByOrNull { policy.priority(it.talkgroup, it.unitToUnit) }
+                if (weakest != null && policy.priority(weakest.talkgroup, weakest.unitToUnit) > policy.priority(id, unitToUnit)) {
+                    release(weakest, "preempted by $label")
+                    start(frequency, timeslot, id, source, unitToUnit)
+                } else {
+                    notice("busy-$id", "$label missed: all $maxTrafficChannels voice channels busy")
+                }
+            }
             else -> start(frequency, timeslot, id, source, unitToUnit)
         }
     }
+
+    /** Calls on granted voice channels, as opposed to voice heard on the main channel itself. */
+    private fun followed(): List<TrafficChannel> = traffic.filter { it.receiver !== control }
 
     private fun scrambleParameters(): ScrambleParameters? {
         val wacn = tracker.site.wacn ?: return null
@@ -231,6 +255,7 @@ class TrunkedReceiver(
             })
             channel.receiver.channelOffsetHz = (frequency - centerHz).toDouble()
             channel.receiver.presetAfc(afc)
+            channel.receiver.simulcast = control.simulcast
         } else {
             val carrier = carriers.getOrPut(frequency) {
                 val receiver = ChannelReceiver(inputRate, Mode.P25_PHASE2, object : ChannelReceiver.Listener {

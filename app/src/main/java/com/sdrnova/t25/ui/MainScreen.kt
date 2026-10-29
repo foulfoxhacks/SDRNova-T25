@@ -1,5 +1,6 @@
 package com.sdrnova.t25.ui
 
+import android.content.Intent
 import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -62,6 +63,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -79,6 +81,7 @@ import com.sdrnova.t25.radio.LogLine
 import com.sdrnova.t25.radio.TrunkingView
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioEngine
+import com.sdrnova.t25.radio.RecordMode
 import com.sdrnova.t25.radio.SourceType
 import com.sdrnova.t25.radio.Tuning
 import com.sdrnova.t25.receiver.Mode
@@ -177,6 +180,7 @@ fun MainScreen(
                                 config.copy(
                                     frequencyHz = tuning.frequencyHz, mode = tuning.mode, channelName = channel.name,
                                     aliasList = channel.aliasList.orEmpty(), centerHz = 0, scan = false,
+                                    simulcast = tuning.simulcast,
                                 ),
                             )
                         }
@@ -238,7 +242,8 @@ private fun StatusCard(
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.primary,
                     )
-                    Text(mode.label, style = MaterialTheme.typography.labelMedium, color = Muted)
+                    val simulcast = if (active) status.simulcast else config.simulcast && mode == Mode.P25_PHASE1
+                    Text(mode.label + if (simulcast) " · LSM simulcast" else "", style = MaterialTheme.typography.labelMedium, color = Muted)
                 }
                 if (active) {
                     Button(onClick = onStop, colors = ButtonDefaults.buttonColors(containerColor = Alert)) { Text("Stop") }
@@ -286,6 +291,23 @@ private fun StatusCard(
             siteLine(site)?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = Muted)
+            }
+            if (status.running && locked && status.frequencyHz > 0) {
+                // The AFC is covering the dongle's crystal error; offer to fold it into the ppm correction.
+                val ppmError = -status.afcHz / status.frequencyHz * 1e6
+                if (kotlin.math.abs(ppmError) >= 1.0 && kotlin.math.abs(status.afcHz) >= 150.0) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Dongle reads %+.1f ppm off".format(ppmError),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Muted,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { onLiveChange(config.copy(ppm = config.ppm + ppmError.roundToInt())) }) {
+                            Text("Correct to ${config.ppm + ppmError.roundToInt()} ppm")
+                        }
+                    }
+                }
             }
             Spacer(Modifier.height(4.dp))
             QuickControls(config, onLiveChange)
@@ -629,7 +651,18 @@ private fun LogTab(log: List<LogLine>) {
         Text("Decoded messages appear here.", modifier = Modifier.padding(20.dp), color = Muted)
         return
     }
+    val context = LocalContext.current
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        item {
+            TextButton(onClick = {
+                val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                val text = log.asReversed().joinToString("\n") { "${stamp.format(Date(it.time))}  ${it.text}" }
+                val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "SDRNova T25 event log")
+                    .putExtra(Intent.EXTRA_TEXT, text)
+                context.startActivity(Intent.createChooser(send, "Share event log"))
+            }) { Text("Share log") }
+        }
         items(log) { line ->
             Row(Modifier.padding(vertical = 3.dp)) {
                 Text(
@@ -752,6 +785,30 @@ private fun SetupTab(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSav
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Mode.entries.filter { it.selectable }.forEach { mode ->
                 FilterChip(selected = config.mode == mode, onClick = { onChange(config.copy(mode = mode)) }, label = { Text(mode.label) })
+            }
+        }
+        if (config.mode == Mode.P25_PHASE1) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Simulcast (LSM)")
+                    Text(
+                        "For simulcast sites, which send CQPSK; sdrtrunk calls this LSM modulation",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Muted,
+                    )
+                }
+                Switch(checked = config.simulcast, onCheckedChange = { onChange(config.copy(simulcast = it)) })
+            }
+        }
+
+        Label("Record calls (WAV files in Music/SDRNova T25)")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            RecordMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = config.recordMode == mode,
+                    onClick = { onChange(config.copy(recordMode = mode)) },
+                    label = { Text(mode.label) },
+                )
             }
         }
 

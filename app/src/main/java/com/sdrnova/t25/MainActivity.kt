@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
                         store.save(config)
                         if (config.gainTenthsDb != previous.gainTenthsDb) engine.setGain(config.gainTenthsDb)
                         if (config.volumeDb != previous.volumeDb) engine.setVolumeDb(config.volumeDb)
+                        if (config.ppm != previous.ppm) engine.setPpm(config.ppm)
                         if (config.tuning != previous.tuning) engine.select(config.tuning)
                         if (config.scan != previous.scan) engine.setScan(config.scan)
                     },

@@ -9,6 +9,7 @@ import com.sdrnova.t25.dsp.Mixer
 import com.sdrnova.t25.dsp.RealFir
 import com.sdrnova.t25.dsp.SampleFormat
 import com.sdrnova.t25.p25.C4fmDemodulator
+import com.sdrnova.t25.p25.P25
 import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.p25.P25P1Framer
 import com.sdrnova.t25.p25.phase2.DqpskDemodulator
@@ -18,6 +19,7 @@ import com.sdrnova.t25.p25.phase2.ScrambleParameters
 import com.sdrnova.t25.p25.phase2.Scrambler
 import kotlin.math.PI
 import kotlin.math.atan2
+import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.sqrt
 
@@ -56,6 +58,25 @@ class ChannelReceiver(
     private val nbfm = NbfmDemodulator(channelRate)
     private val phase2Framer = P25P2Framer(::onPhase2Event)
     private val dqpsk = DqpskDemodulator(channelRate.toDouble(), phase2Framer)
+
+    /** Phase 1 LSM: differential QPSK at 4800 baud into the same framer as C4FM. */
+    private val lsm = DqpskDemodulator(
+        channelRate.toDouble(),
+        object : DqpskDemodulator.Sink {
+            override fun onSync(bitErrors: Int, frequencyErrorHz: Double) = framer.onSync(0, bitErrors, frequencyErrorHz)
+            override fun onDibit(dibit: Int) = framer.onDibit(dibit)
+            override fun isSyncAllowed(): Boolean = framer.isSyncAllowed()
+        },
+        symbolRate = P25.SYMBOL_RATE,
+        syncDibits = P25.SYNC_DIBITS,
+        backlogSymbols = 0,
+        unlockSymbols = 9_600,
+    )
+
+    /** P25 Phase 1 from a simulcast (LSM/CQPSK) site rather than C4FM. */
+    var simulcast = false
+    private var lsmFrequencyErrorHz = 0.0
+    private var lsmLastOffsetHz: Double? = null
     private val dmrFramer = DmrFramer(::onDmrEvent)
 
     /** DMR is 4-level FSK at 4800 baud too; bursts start 66 dibits before their sync, so history is replayed. */
@@ -146,7 +167,7 @@ class ChannelReceiver(
         powerAverage += 0.1 * (power / count - powerAverage)
 
         when (mode) {
-            Mode.P25_PHASE1 -> demodulator.process(work, count)
+            Mode.P25_PHASE1 -> if (simulcast) lsm.process(work, count) else demodulator.process(work, count)
             Mode.P25_PHASE2 -> dqpsk.process(work, count)
             Mode.DMR -> dmrDemodulator.process(work, count)
             Mode.NBFM -> {
@@ -158,12 +179,33 @@ class ChannelReceiver(
     }
 
     private fun onFramerEvent(event: P25Event) {
-        if (event is P25Event.Sync) {
+        if (event is P25Event.Sync && !simulcast) {
             // Pull the carrier into the middle of the channel filter.
             afcHz = (afcHz + 0.5 * event.frequencyErrorHz).coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
             updateMixer()
         }
+        if (simulcast) {
+            // The DQPSK sync matches at any carrier rotation, so a false one can claim a wild offset. Steer only on
+            // a sync whose NID decoded, or one that agrees with the sync before it (needed when the offset is too
+            // big for anything to decode yet), and tell the demodulator the carrier moved.
+            if (event is P25Event.Sync) {
+                val offset = afcHz + event.frequencyErrorHz
+                val previous = lsmLastOffsetHz
+                lsmLastOffsetHz = offset
+                lsmFrequencyErrorHz = event.frequencyErrorHz
+                if (previous != null && abs(offset - previous) < LSM_AGREEMENT_HZ) steerLsm()
+            }
+            if (event is P25Event.Nid) steerLsm()
+        }
         listener.onP25Event(event)
+    }
+
+    private fun steerLsm() {
+        val before = afcHz
+        afcHz = (afcHz + 0.5 * lsmFrequencyErrorHz).coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
+        updateMixer()
+        lsm.carrierMoved(afcHz - before)
+        lsmFrequencyErrorHz -= afcHz - before
     }
 
     private fun onDmrEvent(event: DmrEvent) {
@@ -189,6 +231,7 @@ class ChannelReceiver(
     companion object {
         private const val STAGE_PASS_HZ = 8_000.0
         private const val AFC_LIMIT_HZ = 6_000.0
+        private const val LSM_AGREEMENT_HZ = 250.0
 
         /** 48 kHz suits RTL-SDR and HackRF rates; 50 kHz suits Airspy's 2.5/3/6/10 MS/s. */
         private val CHANNEL_RATES = intArrayOf(48_000, 50_000)

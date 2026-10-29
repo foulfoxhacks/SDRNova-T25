@@ -37,10 +37,14 @@ data class RadioConfig(
     val scanDwellMs: Int = 500,
     /** How long scanning waits on a channel after its call ends, for the reply. */
     val scanHangMs: Int = 2_000,
+    /** P25 Phase 1 from a simulcast site, which transmits LSM (CQPSK) instead of C4FM. */
+    val simulcast: Boolean = false,
+    /** Which calls are saved as WAV files; "marked" follows the record flag on sdrtrunk aliases. */
+    val recordMode: RecordMode = RecordMode.MARKED,
 ) {
     val effectiveCenterHz: Long get() = if (centerHz > 0) centerHz else frequencyHz + RadioEngine.TUNER_OFFSET_HZ
 
-    val tuning: Tuning get() = Tuning(frequencyHz, mode, channelName, aliasList.ifEmpty { null })
+    val tuning: Tuning get() = Tuning(frequencyHz, mode, channelName, aliasList.ifEmpty { null }, simulcast)
 
     /** Talkgroup aliases from "id,name" lines; RadioReference CSV rows (Decimal,Hex,Alpha Tag,...) also work. */
     val aliases: Map<Int, String> by lazy {
@@ -83,6 +87,8 @@ class ConfigStore(context: Context) {
             scan = prefs.getBoolean("scan", defaults.scan),
             scanDwellMs = prefs.getInt("scanDwellMs", defaults.scanDwellMs),
             scanHangMs = prefs.getInt("scanHangMs", defaults.scanHangMs),
+            simulcast = prefs.getBoolean("simulcast", defaults.simulcast),
+            recordMode = runCatching { RecordMode.valueOf(prefs.getString("recordMode", null)!!) }.getOrDefault(defaults.recordMode),
         )
     }
 
@@ -107,6 +113,8 @@ class ConfigStore(context: Context) {
             .putBoolean("scan", config.scan)
             .putInt("scanDwellMs", config.scanDwellMs)
             .putInt("scanHangMs", config.scanHangMs)
+            .putBoolean("simulcast", config.simulcast)
+            .putString("recordMode", config.recordMode.name)
             .apply()
     }
 }

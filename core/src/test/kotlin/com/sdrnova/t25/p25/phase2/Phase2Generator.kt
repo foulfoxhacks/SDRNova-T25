@@ -81,17 +81,25 @@ object Phase2Generator {
     }
 
     /** H-DQPSK: each dibit turns the carrier phase by ±π/4 or ±3π/4, pulse-shaped with RRC (alpha 0.2). */
-    fun modulate(dibits: IntArray, outputRate: Int, carrierHz: Double, amplitude: Double = 0.25): FloatArray {
-        val rrc = DqpskDemodulator.rootRaisedCosine(SPS.toDouble(), 0.2, 8)
-        val gain = 1.0 / rrc.sum() * SPS
-        val baseI = DoubleArray(dibits.size * SPS + rrc.size)
-        val baseQ = DoubleArray(dibits.size * SPS + rrc.size)
+    fun modulate(
+        dibits: IntArray,
+        outputRate: Int,
+        carrierHz: Double,
+        amplitude: Double = 0.25,
+        /** 6000 for Phase 2; 4800 makes Phase 1 LSM. */
+        symbolRate: Int = BASE_RATE / SPS,
+    ): FloatArray {
+        val sps = BASE_RATE / symbolRate
+        val rrc = DqpskDemodulator.rootRaisedCosine(sps.toDouble(), 0.2, 8)
+        val gain = 1.0 / rrc.sum() * sps
+        val baseI = DoubleArray(dibits.size * sps + rrc.size)
+        val baseQ = DoubleArray(dibits.size * sps + rrc.size)
         var phase = 0.0
         for ((k, dibit) in dibits.withIndex()) {
             phase += P25.idealPhase(dibit)
             for (t in rrc.indices) {
-                baseI[k * SPS + t] += cos(phase) * rrc[t] * gain
-                baseQ[k * SPS + t] += sin(phase) * rrc[t] * gain
+                baseI[k * sps + t] += cos(phase) * rrc[t] * gain
+                baseQ[k * sps + t] += sin(phase) * rrc[t] * gain
             }
         }
         val ratio = outputRate / BASE_RATE

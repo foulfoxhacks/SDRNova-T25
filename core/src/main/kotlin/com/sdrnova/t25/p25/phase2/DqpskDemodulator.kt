@@ -13,7 +13,8 @@ import kotlin.math.sqrt
 
 /**
  * Differential demodulator for P25 Phase 2 H-DQPSK (6000 symbols/s), using the same dibit-to-phase mapping as
- * Phase 1 (±π/4, ±3π/4).
+ * Phase 1 (±π/4, ±3π/4). With Phase 1's symbol rate and frame sync it also demodulates LSM (CQPSK), which
+ * simulcast sites transmit because a C4FM discriminator falls apart on overlapping signals from several towers.
  *
  * Samples go through a root-raised-cosine matched filter (alpha 0.2), then each sample is multiplied by the
  * conjugate of the sample one symbol earlier, giving the phase change across a symbol as a complex number.
@@ -22,13 +23,26 @@ import kotlin.math.sqrt
  * would. sdrtrunk uses a coherent Costas-loop demodulator here instead; this trades a little sensitivity for
  * simplicity.
  */
-class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
+class DqpskDemodulator(
+    sampleRate: Double,
+    private val sink: Sink,
+    private val symbolRate: Double = SYMBOL_RATE,
+    private val syncDibits: IntArray = SYNC_DIBITS,
+    /** Symbols of history replayed on first lock, for frames that start before their sync (Phase 2 fragments). */
+    private val backlogSymbols: Int = BACKLOG_SYMBOLS,
+    /** Symbols without a sync before the carrier counts as gone. */
+    private val unlockSymbols: Int = UNLOCK_SYMBOLS,
+) {
     interface Sink {
         fun onSync(bitErrors: Int, frequencyErrorHz: Double)
         fun onDibit(dibit: Int)
+
+        /** Whether a new sync may interrupt the frame being assembled. */
+        fun isSyncAllowed(): Boolean = true
     }
 
-    private val samplesPerSymbol = sampleRate / SYMBOL_RATE
+    private val syncLength = syncDibits.size
+    private val samplesPerSymbol = sampleRate / symbolRate
     private val matched = rootRaisedCosine(samplesPerSymbol, 0.2, 8)
     private val filterI = FloatArray(matched.size * 2)
     private val filterQ = FloatArray(matched.size * 2)
@@ -42,9 +56,9 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
     private val zQ: FloatArray
     private var sampleIndex = 0L
 
-    private val syncOffsets = IntArray(SYNC_LENGTH) { ((SYNC_LENGTH - 1 - it) * samplesPerSymbol).roundToInt() }
-    private val syncI = FloatArray(SYNC_LENGTH) { cos(P25.idealPhase(SYNC_DIBITS[it]).toDouble()).toFloat() }
-    private val syncQ = FloatArray(SYNC_LENGTH) { sin(P25.idealPhase(SYNC_DIBITS[it]).toDouble()).toFloat() }
+    private val syncOffsets = IntArray(syncLength) { ((syncLength - 1 - it) * samplesPerSymbol).roundToInt() }
+    private val syncI = FloatArray(syncLength) { cos(P25.idealPhase(syncDibits[it]).toDouble()).toFloat() }
+    private val syncQ = FloatArray(syncLength) { sin(P25.idealPhase(syncDibits[it]).toDouble()).toFloat() }
 
     private var locked = false
     private var nextSymbolTime = 0.0
@@ -59,7 +73,7 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
     init {
         // Room to replay most of a fragment once the first sync fixes timing and carrier offset.
         var size = 64
-        while (size < (BACKLOG_SYMBOLS + SYNC_LENGTH + 4) * samplesPerSymbol + 64) size = size shl 1
+        while (size < (backlogSymbols + syncLength + 4) * samplesPerSymbol + 64) size = size shl 1
         ringSize = size
         ringMask = (size - 1).toLong()
         yI = FloatArray(size)
@@ -73,6 +87,11 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
         candidateIndex = -1
         candidateScore = 0f
         rotation = 0f
+    }
+
+    /** The mixer moved the carrier down by [hz]; adjust the rotation being tracked to match. */
+    fun carrierMoved(hz: Double) {
+        rotation = wrap(rotation - (2 * PI * hz / symbolRate).toFloat())
     }
 
     fun process(iq: FloatArray, count: Int) {
@@ -98,7 +117,7 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
             val pastQ = interpolate(yQ, n - samplesPerSymbol)
             zI[slot] = accI * pastI + accQ * pastQ
             zQ[slot] = accQ * pastI - accI * pastQ
-            if (locked && n - lastSync > UNLOCK_SYMBOLS * samplesPerSymbol) locked = false
+            if (locked && n - lastSync > unlockSymbols * samplesPerSymbol) locked = false
             if (locked) clockSymbols(n)
             if (n > syncOffsets[0] + 2 * samplesPerSymbol) searchSync(n)
         }
@@ -143,7 +162,7 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
         var sumI = 0f
         var sumQ = 0f
         var energy = 0f
-        for (k in 0 until SYNC_LENGTH) {
+        for (k in 0 until syncLength) {
             val slot = ((end - syncOffsets[k]) and ringMask).toInt()
             val i = zI[slot]
             val q = zQ[slot]
@@ -163,7 +182,7 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
             candidateScore = 0f
             confirm(peak)
         }
-        if (n < holdoffUntil) return
+        if (n < holdoffUntil || !sink.isSyncAllowed()) return
         val score = correlate(n)
         if (score > SYNC_THRESHOLD && score > candidateScore) {
             candidateScore = score
@@ -182,22 +201,22 @@ class DqpskDemodulator(sampleRate: Double, private val sink: Sink) {
         val newRotation = angle[0]
 
         var bitErrors = 0
-        for (k in 0 until SYNC_LENGTH) {
-            val time = end - (SYNC_LENGTH - 1 - k) * samplesPerSymbol
+        for (k in 0 until syncLength) {
+            val time = end - (syncLength - 1 - k) * samplesPerSymbol
             val phase = wrap(atan2(interpolate(zQ, time), interpolate(zI, time)) - newRotation)
-            bitErrors += (P25.slice(phase) xor SYNC_DIBITS[k]).countOneBits()
+            bitErrors += (P25.slice(phase) xor syncDibits[k]).countOneBits()
         }
         if (bitErrors > MAX_SYNC_BIT_ERRORS) return
 
         rotation = newRotation
         holdoffUntil = peak + (4 * samplesPerSymbol).toLong()
         lastSync = peak
-        sink.onSync(bitErrors, rotation * SYMBOL_RATE / (2 * PI))
-        if (!locked) {
+        sink.onSync(bitErrors, rotation * symbolRate / (2 * PI))
+        if (!locked && backlogSymbols > 0) {
             // First lock: replay the symbols still in the history, up to and including this sync, so the framer
             // sees the start of the fragment the sync sits in.
             val oldest = sampleIndex - ringSize + 2 * samplesPerSymbol + 2
-            val available = ((end - oldest) / samplesPerSymbol).toInt().coerceIn(SYNC_LENGTH - 1, BACKLOG_SYMBOLS)
+            val available = ((end - oldest) / samplesPerSymbol).toInt().coerceIn(syncLength - 1, backlogSymbols)
             for (k in available downTo 0) sink.onDibit(P25.slice(symbolPhase(end - k * samplesPerSymbol)))
         }
         nextSymbolTime = end + samplesPerSymbol

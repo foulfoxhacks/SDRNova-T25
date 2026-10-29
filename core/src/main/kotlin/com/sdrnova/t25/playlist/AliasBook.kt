@@ -1,10 +1,12 @@
 package com.sdrnova.t25.playlist
 
+import com.sdrnova.t25.receiver.CallPolicy
+
 /**
  * Talkgroup and radio lookups for the radio: names, priority, lockout and recording, from playlist aliases plus the
  * quick "id,name" entries typed in Setup (which win when both name the same talkgroup).
  */
-class AliasBook(aliases: List<PlaylistAlias>, names: Map<Int, String> = emptyMap()) {
+class AliasBook(aliases: List<PlaylistAlias>, names: Map<Int, String> = emptyMap()) : CallPolicy {
     private val talkgroups = HashMap<Int, PlaylistAlias>()
     private val talkgroupRanges = ArrayList<Pair<IntRange, PlaylistAlias>>()
     private val radios = HashMap<Int, PlaylistAlias>()
@@ -34,13 +36,18 @@ class AliasBook(aliases: List<PlaylistAlias>, names: Map<Int, String> = emptyMap
 
     fun radioName(radio: Int): String? = (radios[radio] ?: radioRanges.firstOrNull { radio in it.first }?.second)?.name
 
-    /** sdrtrunk's "do not monitor": followed for the log, never played. */
+    /** sdrtrunk's "do not monitor": never followed or played, though grants still show in the log. */
     fun lockedOut(talkgroup: Int): Boolean = alias(talkgroup)?.lockedOut == true
 
     /** 1 is highest; talkgroups without a priority rank below every listed one. */
     fun priority(talkgroup: Int): Int = alias(talkgroup)?.priority?.takeIf { it > 0 } ?: UNLISTED_PRIORITY
 
     fun record(talkgroup: Int): Boolean = alias(talkgroup)?.record == true
+
+    override fun follow(talkgroup: Int, unitToUnit: Boolean): Boolean = unitToUnit || !lockedOut(talkgroup)
+
+    override fun priority(talkgroup: Int, unitToUnit: Boolean): Int =
+        if (unitToUnit) UNLISTED_PRIORITY else priority(talkgroup)
 
     companion object {
         const val UNLISTED_PRIORITY = 101

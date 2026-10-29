@@ -30,8 +30,12 @@ import com.sdrnova.t25.voice.VoiceResampler
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
@@ -44,6 +48,7 @@ data class EngineStatus(
     val centerHz: Long = 0,
     val sampleRate: Int = 0,
     val mode: Mode = Mode.P25_PHASE1,
+    val simulcast: Boolean = false,
     val channelName: String = "",
     val vocoder: String? = null,
     val signalDbfs: Float = -100f,
@@ -64,7 +69,14 @@ data class EngineStatus(
 )
 
 /** Somewhere to listen: a playlist channel, a scan stop, or a frequency typed or tapped by hand. */
-data class Tuning(val frequencyHz: Long, val mode: Mode, val name: String = "", val aliasList: String? = null) {
+data class Tuning(
+    val frequencyHz: Long,
+    val mode: Mode,
+    val name: String = "",
+    val aliasList: String? = null,
+    /** P25 LSM (CQPSK) rather than C4FM. */
+    val simulcast: Boolean = false,
+) {
     val label: String get() = name.ifEmpty { TrunkingTracker.mhz(frequencyHz) }
 
     companion object {
@@ -72,7 +84,7 @@ data class Tuning(val frequencyHz: Long, val mode: Mode, val name: String = "", 
         fun of(channel: PlaylistChannel): Tuning? {
             val mode = channel.protocol.mode ?: return null
             val frequency = channel.frequencies.firstOrNull() ?: return null
-            return Tuning(frequency, mode, channel.name, channel.aliasList)
+            return Tuning(frequency, mode, channel.name, channel.aliasList, channel.simulcast && mode == Mode.P25_PHASE1)
         }
     }
 }
@@ -147,6 +159,7 @@ class RadioEngine(private val context: Context) {
             _status.value = EngineStatus(
                 starting = true, frequencyHz = config.frequencyHz, centerHz = config.effectiveCenterHz,
                 sampleRate = config.sampleRate, mode = config.mode, channelName = config.channelName,
+                simulcast = config.simulcast && config.mode == Mode.P25_PHASE1,
             )
             _trunking.value = TrunkingView()
             _log.value = emptyList()
@@ -167,6 +180,12 @@ class RadioEngine(private val context: Context) {
 
     fun setVolumeDb(db: Float) {
         synchronized(lock) { session }?.setVolumeDb(db)
+    }
+
+    /** Applies a new frequency correction and recentres the decoder, whose AFC was covering the old error. */
+    fun setPpm(ppm: Int) = post {
+        source?.setPpm(ppm)
+        resetAfc()
     }
 
     /** Moves the running radio to [tuning] (retuning the dongle if it's outside the band in view) and stops scanning. */
@@ -214,6 +233,10 @@ class RadioEngine(private val context: Context) {
         private val resampler = VoiceResampler(48_000)
         private var playingChannel: Int? = null
         private val listener = Listener()
+        private val recorders = HashMap<Int, CallRecorder>()
+        private var analogRecorder: CallRecorder? = null
+        private var analogQuietSamples = 0
+        private val saver = Executors.newSingleThreadExecutor()
 
         private lateinit var iq: IqSource
         private lateinit var receiver: TrunkedReceiver
@@ -315,6 +338,9 @@ class RadioEngine(private val context: Context) {
                 source?.stop()
                 reader?.join(2_000)
                 audio?.stop()
+                if (::receiver.isInitialized) receiver.releaseAll("radio stopped")
+                finishAnalogRecording()
+                saver.shutdown()
                 source?.let {
                     runCatching { it.setBiasTee(false) }
                     runCatching { it.close() }
@@ -345,6 +371,7 @@ class RadioEngine(private val context: Context) {
         }
 
         private fun process() {
+            playlist = playlists.load()
             receiver = newReceiver(tuning)
             ensureAudio()
             reloadPlaylist()
@@ -387,7 +414,15 @@ class RadioEngine(private val context: Context) {
             mode = target.mode,
             maxTrafficChannels = if (target.mode == Mode.P25_PHASE1) config.maxTrafficChannels else 0,
             listener = listener,
-        ).also { it.control.squelchThreshold = config.squelch }
+        ).also {
+            it.control.squelchThreshold = config.squelch
+            it.simulcast = target.simulcast
+            it.policy = bookFor(target.aliasList)
+        }
+
+        fun resetAfc() {
+            receiver.control.presetAfc(0.0)
+        }
 
         /** NBFM plays at the channel rate, digital voice at 48 kHz after the vocoder. */
         private fun ensureAudio() {
@@ -406,10 +441,13 @@ class RadioEngine(private val context: Context) {
          */
         fun retarget(target: Tuning) {
             if (target == tuning) return
+            finishAnalogRecording()
             val old = receiver
             val inView = abs(target.frequencyHz - centerHz) <= old.usableHalfBandwidthHz
             if (target.mode == old.mode && inView) {
                 old.retune(target.frequencyHz)
+                old.simulcast = target.simulcast
+                old.policy = bookFor(target.aliasList)
             } else {
                 old.releaseAll("retuned")
                 if (!inView) {
@@ -426,7 +464,7 @@ class RadioEngine(private val context: Context) {
             _aliases.value = aliases
             _status.value = _status.value.copy(
                 frequencyHz = target.frequencyHz, centerHz = centerHz, mode = target.mode, channelName = target.name,
-                nac = -1, error = null,
+                simulcast = target.simulcast, nac = -1, error = null,
             )
         }
 
@@ -487,6 +525,7 @@ class RadioEngine(private val context: Context) {
             books.clear()
             aliases = bookFor(tuning.aliasList)
             _aliases.value = aliases
+            receiver.policy = aliases
             val previous = scanner ?: return
             startScan()
             scanner?.hold = previous.hold
@@ -522,6 +561,7 @@ class RadioEngine(private val context: Context) {
 
             override fun onAudio(samples: ShortArray, count: Int) {
                 audio?.write(samples, count)
+                recordAnalog(samples, count)
             }
 
             override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
@@ -531,38 +571,54 @@ class RadioEngine(private val context: Context) {
             }
 
             override fun onTrafficVoice(channel: TrunkedReceiver.TrafficChannel, ldu: Ldu) =
-                play(channel, ldu.voiceFrames) { it.createImbeDecoder() }
+                voice(channel, ldu.voiceFrames) { it.createImbeDecoder() }
 
             override fun onTrafficAmbe(channel: TrunkedReceiver.TrafficChannel, frames: List<ByteArray>) =
-                play(channel, frames) { it.createAmbeDecoder() }
+                voice(channel, frames) { it.createAmbeDecoder() }
 
             /**
              * One call has the speaker at a time: the first to deliver voice keeps it until it ends, unless a call
-             * with a higher alias priority starts talking. Locked-out talkgroups are never played.
+             * with a higher alias priority starts talking. Locked-out talkgroups are never played. Calls being
+             * recorded are decoded whether or not they have the speaker.
              */
-            private fun play(
+            private fun voice(
                 channel: TrunkedReceiver.TrafficChannel,
                 frames: List<ByteArray>,
                 create: (VocoderProvider) -> VoiceDecoder?,
             ) {
                 val provider = vocoder ?: return
                 if (channel.encrypted || lockedOut(channel)) return
-                val current = playingChannel
-                if (current != null && current != channel.id) {
-                    val playing = receiver.trafficChannels.firstOrNull { it.id == current }
-                    if (playing != null && priority(channel) >= priority(playing)) return
+                val speaker = takeSpeaker(channel)
+                val recorder = if (shouldRecord(channel)) {
+                    recorders.getOrPut(channel.id) { CallRecorder(8_000, recordingTitle(channel)) }
+                } else {
+                    null
                 }
-                playingChannel = channel.id
+                if (!speaker && recorder == null) return
                 val decoder = decoders.getOrPut(channel.id) { create(provider) ?: return }
                 for (frame in frames) {
                     val pcm = runCatching { decoder.decode(frame) }.getOrNull() ?: continue
-                    val samples = resampler.process(pcm)
-                    audio?.write(samples, samples.size)
+                    recorder?.write(pcm)
+                    if (speaker) {
+                        val samples = resampler.process(pcm)
+                        audio?.write(samples, samples.size)
+                    }
                 }
+            }
+
+            private fun takeSpeaker(channel: TrunkedReceiver.TrafficChannel): Boolean {
+                val current = playingChannel
+                if (current != null && current != channel.id) {
+                    val playing = receiver.trafficChannels.firstOrNull { it.id == current }
+                    if (playing != null && priority(channel) >= priority(playing)) return false
+                }
+                playingChannel = channel.id
+                return true
             }
 
             override fun onTrafficEnd(channel: TrunkedReceiver.TrafficChannel, reason: String) {
                 decoders.remove(channel.id)
+                recorders.remove(channel.id)?.let(::save)
                 if (playingChannel == channel.id) playingChannel = null
                 // Every voice frame is 20 ms, Phase 1 or 2.
                 val seconds = channel.voiceFrames / 50
@@ -580,6 +636,54 @@ class RadioEngine(private val context: Context) {
         }
 
         private fun lockedOut(channel: TrunkedReceiver.TrafficChannel) = !channel.unitToUnit && aliases.lockedOut(channel.talkgroup)
+
+        private fun shouldRecord(channel: TrunkedReceiver.TrafficChannel) = when (config.recordMode) {
+            RecordMode.OFF -> false
+            RecordMode.MARKED -> !channel.unitToUnit && aliases.record(channel.talkgroup)
+            RecordMode.ALL -> true
+        }
+
+        private fun recordingTitle(channel: TrunkedReceiver.TrafficChannel): String {
+            val name = if (channel.unitToUnit) null else aliases.name(channel.talkgroup)
+            val who = if (channel.unitToUnit) "Private ${channel.talkgroup}" else "TG ${channel.talkgroup}"
+            return listOfNotNull(who, name).joinToString(" ")
+        }
+
+        /** Analog has no talkgroups, so only "every call" records it: each opening of the squelch is a call. */
+        private fun recordAnalog(samples: ShortArray, count: Int) {
+            if (config.recordMode != RecordMode.ALL || receiver.mode != Mode.NBFM) return
+            val rate = receiver.control.channelRate
+            var recorder = analogRecorder
+            if (receiver.control.squelchOpen) {
+                if (recorder == null) {
+                    recorder = CallRecorder(rate / ANALOG_DECIMATION, tuning.label)
+                    analogRecorder = recorder
+                }
+                analogQuietSamples = 0
+            } else {
+                if (recorder == null) return
+                analogQuietSamples += count
+                if (analogQuietSamples > rate) return finishAnalogRecording()
+            }
+            recorder.write(samples, count, ANALOG_DECIMATION)
+        }
+
+        private fun finishAnalogRecording() {
+            analogRecorder?.let(::save)
+            analogRecorder = null
+        }
+
+        private fun save(recorder: CallRecorder) {
+            if (recorder.seconds < MIN_RECORDING_SECONDS) return
+            val title = recorder.title.replace(UNSAFE_FILE_CHARACTERS, "_").take(60)
+            val name = "${FILE_TIME.format(Date(recorder.startedAt))}_$title.wav"
+            val wav = recorder.wav()
+            saver.execute {
+                runCatching { Recordings.save(context, name, wav) }
+                    .onSuccess { path -> post { addLog("Recorded $path") } }
+                    .onFailure { error -> post { addLog("Couldn't save a recording: ${error.message}") } }
+            }
+        }
 
         private fun priority(channel: TrunkedReceiver.TrafficChannel) =
             if (channel.unitToUnit) AliasBook.UNLISTED_PRIORITY else aliases.priority(channel.talkgroup)
@@ -642,6 +746,12 @@ class RadioEngine(private val context: Context) {
     companion object {
         private const val TAG = "RadioEngine"
         private val TALKGROUP = Regex("TG (\\d+)")
+        private val UNSAFE_FILE_CHARACTERS = Regex("[^A-Za-z0-9._-]+")
+        private val FILE_TIME = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+        private const val MIN_RECORDING_SECONDS = 1.0
+
+        /** NBFM channel audio is 48 or 50 kHz; recordings keep every 6th sample. */
+        private const val ANALOG_DECIMATION = 6
 
         /** Spectrum (and waterfall) frames per second. */
         private const val SPECTRUM_RATE = 12

@@ -15,8 +15,8 @@ android {
         applicationId = "com.sdrnova.t25"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.4.1"
+        versionCode = 6
+        versionName = "0.4.2"
         // RadioReference issues each app its own web service key. Build with -Prr.appKey=... (or put rr.appKey in
         // ~/.gradle/gradle.properties) to bundle one; otherwise users paste their own in the app.
         buildConfigField("String", "RR_APP_KEY", "\"${(project.findProperty("rr.appKey") as String?).orEmpty()}\"")

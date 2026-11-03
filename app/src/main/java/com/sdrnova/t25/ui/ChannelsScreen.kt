@@ -2,11 +2,14 @@ package com.sdrnova.t25.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,9 +22,11 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -44,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import com.sdrnova.t25.playlist.ChannelProtocol
 import com.sdrnova.t25.playlist.Playlist
 import com.sdrnova.t25.playlist.PlaylistChannel
+import com.sdrnova.t25.radio.DashboardState
 import com.sdrnova.t25.radio.EngineStatus
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.Tuning
@@ -56,10 +62,16 @@ fun ChannelsScreen(
     status: EngineStatus,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    dashboard: DashboardState,
+    onDashboard: (Boolean) -> Unit,
+    onRadioReference: () -> Unit,
     onPick: (PlaylistChannel) -> Unit,
     onChange: (Playlist) -> Unit,
 ) {
     var confirmClear by remember { mutableStateOf(false) }
+    var addMenu by remember { mutableStateOf(false) }
+    var moreMenu by remember { mutableStateOf(false) }
+    var showDashboard by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<PlaylistChannel?>(null) }
     val active = status.running || status.starting
     val hereHz = if (active) status.frequencyHz else config.frequencyHz
@@ -73,18 +85,68 @@ fun ChannelsScreen(
             title = "Channels",
             subtitle = if (empty) null else "${playlist.channels.size} channels · $scannable in scan · ${playlist.aliases.size} aliases",
         ) {
-            IconButton(onClick = onImport) { Icon(Glyphs.Import, contentDescription = "Import sdrtrunk playlist", tint = Cyan) }
-            if (!empty) IconButton(onClick = onExport) { Icon(Glyphs.Export, contentDescription = "Export playlist", tint = Ink) }
-            IconButton(onClick = {
-                val channel = PlaylistChannel(
-                    name = "%.4f MHz".format(hereHz / 1e6), system = "SDRNova", site = "", enabled = true,
-                    frequencies = listOf(hereHz), protocol = ChannelProtocol.of(hereMode), decoderType = "",
-                    modulation = if (hereMode == com.sdrnova.t25.receiver.Mode.P25_PHASE1 && config.simulcast) "LSM" else null,
-                    aliasList = config.aliasList.ifEmpty { null },
+            IconButton(onClick = { showDashboard = true }) {
+                Icon(Glyphs.Web, contentDescription = "Web dashboard", tint = if (dashboard.running) Good else Ink)
+            }
+            Box {
+                IconButton(onClick = { addMenu = true }) { Icon(Icons.Filled.Add, contentDescription = "Add channels", tint = Cyan) }
+                DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Import sdrtrunk playlist") },
+                        leadingIcon = { Icon(Glyphs.Import, contentDescription = null) },
+                        onClick = { addMenu = false; onImport() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("From RadioReference") },
+                        leadingIcon = { Icon(Glyphs.Cloud, contentDescription = null) },
+                        onClick = { addMenu = false; onRadioReference() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("From a computer (web dashboard)") },
+                        leadingIcon = { Icon(Glyphs.Web, contentDescription = null) },
+                        onClick = { addMenu = false; showDashboard = true },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Add %.4f MHz".format(hereHz / 1e6)) },
+                        leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                        onClick = {
+                            addMenu = false
+                            onChange(playlist.copy(channels = playlist.channels + hereChannel(hereHz, hereMode, config)))
+                        },
+                    )
+                }
+            }
+            if (!empty) {
+                Box {
+                    IconButton(onClick = { moreMenu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More", tint = Ink) }
+                    DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Export sdrtrunk playlist") },
+                            leadingIcon = { Icon(Glyphs.Export, contentDescription = null) },
+                            onClick = { moreMenu = false; onExport() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Clear all", color = Alert) },
+                            onClick = { moreMenu = false; confirmClear = true },
+                        )
+                    }
+                }
+            }
+        }
+        if (dashboard.running) {
+            Row(
+                Modifier.fillMaxWidth().background(Good.copy(alpha = 0.12f)).clickable { showDashboard = true }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Glyphs.Web, contentDescription = null, tint = Good, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${dashboard.url}  \u00b7  PIN ${dashboard.pin.orEmpty().chunked(3).joinToString(" ")}",
+                    color = GoodText, fontSize = 13.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                onChange(playlist.copy(channels = playlist.channels + channel))
-            }) { Icon(Icons.Filled.Add, contentDescription = "Add the current frequency", tint = Ink) }
-            if (!empty) IconButton(onClick = { confirmClear = true }) { Icon(Icons.Filled.Delete, contentDescription = "Clear all", tint = Muted) }
+            }
         }
 
         if (empty) {
@@ -97,17 +159,18 @@ fun ChannelsScreen(
                     color = Muted, fontSize = 14.sp,
                 )
                 Button(onClick = onImport) { Text("Import sdrtrunk playlist") }
+                OutlinedButton(onClick = onRadioReference) { Text("Look up my area on RadioReference") }
+                OutlinedButton(onClick = { showDashboard = true }) { Text("Type them in from a computer") }
                 OutlinedButton(onClick = {
-                    val channel = PlaylistChannel(
-                        "%.4f MHz".format(hereHz / 1e6), "SDRNova", "", true, listOf(hereHz), ChannelProtocol.of(hereMode), "", null, null,
-                    )
-                    onChange(playlist.copy(channels = playlist.channels + channel))
+                    onChange(playlist.copy(channels = playlist.channels + hereChannel(hereHz, hereMode, config)))
                 }) { Text("Add %.4f MHz".format(hereHz / 1e6)) }
             }
         } else {
             ChannelGrid(playlist, config, hereHz, onPick, onChange) { removing = it }
         }
     }
+
+    if (showDashboard) WebDashboardDialog(dashboard, onToggle = onDashboard, onDismiss = { showDashboard = false })
 
     if (confirmClear) {
         AlertDialog(
@@ -137,6 +200,14 @@ fun ChannelsScreen(
         )
     }
 }
+
+/** The frequency the radio is on, as a new channel. */
+private fun hereChannel(hereHz: Long, hereMode: com.sdrnova.t25.receiver.Mode, config: RadioConfig) = PlaylistChannel(
+    name = "%.4f MHz".format(hereHz / 1e6), system = "SDRNova", site = "", enabled = true,
+    frequencies = listOf(hereHz), protocol = ChannelProtocol.of(hereMode), decoderType = "",
+    modulation = if (hereMode == com.sdrnova.t25.receiver.Mode.P25_PHASE1 && config.simulcast) "LSM" else null,
+    aliasList = config.aliasList.ifEmpty { null },
+)
 
 @Composable
 private fun ChannelGrid(

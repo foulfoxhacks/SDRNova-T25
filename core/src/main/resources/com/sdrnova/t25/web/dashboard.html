@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDRNova T25</title>
+<style>
+:root { --canvas:#000; --panel:#1b262c; --deep:#0e1519; --card:#141c21; --line:#20282d; --outline:#37474f; --ink:#eceff1; --muted:#8a9399; --cyan:#26c6da; --good:#4caf50; --amber:#ffa726; --alert:#ef5350; --violet:#ab47bc; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--canvas); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+header { background:var(--panel); padding:14px 20px; display:flex; align-items:center; gap:12px; }
+header h1 { font-size:18px; margin:0; font-weight:600; }
+header .sub { color:var(--muted); font-size:13px; }
+.dot { width:10px; height:10px; border-radius:50%; background:var(--good); }
+nav { display:flex; gap:8px; padding:12px 20px; background:var(--deep); flex-wrap:wrap; }
+nav button { flex:0 0 auto; }
+main { max-width:1100px; margin:0 auto; padding:16px 20px 60px; }
+button { background:transparent; color:var(--ink); border:1px solid var(--outline); border-radius:8px; padding:8px 14px; font:inherit; font-weight:600; cursor:pointer; }
+button:hover { border-color:var(--cyan); }
+button.on, button.primary { border-color:var(--cyan); color:var(--cyan); background:rgba(38,198,218,.14); }
+button.danger { color:var(--alert); border-color:transparent; }
+input, select { background:var(--deep); color:var(--ink); border:1px solid var(--outline); border-radius:8px; padding:8px 10px; font:inherit; width:100%; }
+input:focus, select:focus { outline:none; border-color:var(--cyan); }
+label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+.card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:16px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
+.checks { display:flex; gap:18px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+.checks label { display:flex; gap:6px; align-items:center; color:var(--ink); font-size:14px; margin:0; }
+.checks input { width:auto; }
+h2 { font-size:13px; letter-spacing:.06em; color:var(--cyan); margin:22px 0 8px; text-transform:uppercase; }
+table { width:100%; border-collapse:collapse; }
+th { text-align:left; font-size:12px; color:var(--muted); font-weight:500; padding:6px 8px; }
+td { padding:8px; border-top:1px solid var(--line); vertical-align:middle; }
+td.mono, .mono { font-family:ui-monospace,Consolas,monospace; font-size:13px; }
+.chip { display:inline-block; font-size:11px; font-weight:700; padding:2px 7px; border-radius:4px; }
+.P25 { color:var(--cyan); background:rgba(38,198,218,.2); } .DMR { color:var(--violet); background:rgba(171,71,188,.2); }
+.NBFM { color:#81c784; background:rgba(76,175,80,.2); } .other { color:var(--muted); background:rgba(138,147,153,.2); }
+.muted { color:var(--muted); }
+#toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--panel); border:1px solid var(--outline); padding:10px 16px; border-radius:10px; display:none; max-width:90vw; }
+#toast.error { border-color:var(--alert); color:#ffcdd2; }
+#lock { position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; }
+#lock .card { width:min(360px,90vw); text-align:center; }
+#lock input { font-size:28px; letter-spacing:.3em; text-align:center; margin:12px 0; }
+.toggle { width:22px; height:22px; border-radius:5px; border:2px solid var(--outline); display:inline-block; cursor:pointer; vertical-align:middle; }
+.toggle.on { border-color:var(--cyan); background:var(--cyan); }
+.hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header><span class="dot"></span><div><h1>SDRNova T25</h1><div class="sub" id="summary">Connecting…</div></div></header>
+<nav>
+  <button data-view="channels" class="on">Channels</button>
+  <button data-view="aliases">Talkgroup aliases</button>
+  <button data-view="files">Import and export</button>
+</nav>
+<main>
+  <section id="channels">
+    <div class="card">
+      <h2 style="margin-top:0">Add a channel</h2>
+      <form id="channelForm">
+        <div class="grid">
+          <div><label>Name</label><input name="name" placeholder="County Fire Dispatch"></div>
+          <div><label>Frequency (MHz), alternates after commas</label><input name="frequencies" class="mono" placeholder="851.0125, 851.2625" required></div>
+          <div><label>Mode</label><select name="protocol"><option value="P25">P25 Phase 1</option><option value="DMR">DMR</option><option value="NBFM">Analog NBFM</option></select></div>
+          <div><label>System</label><input name="system" placeholder="County P25"></div>
+          <div><label>Site</label><input name="site" placeholder="Simulcast 1"></div>
+          <div><label>Alias list</label><input name="aliasList" list="aliasLists" placeholder="Every alias"></div>
+        </div>
+        <div class="checks">
+          <label><input type="checkbox" name="scan" value="1" checked> Include in scan</label>
+          <label><input type="checkbox" name="lsm" value="1"> P25 simulcast (LSM)</label>
+          <span style="flex:1"></span>
+          <button class="primary" type="submit">Add channel</button>
+        </div>
+      </form>
+    </div>
+    <div id="channelList"></div>
+  </section>
+
+  <section id="aliases" class="hidden">
+    <div class="card">
+      <h2 style="margin-top:0">Add a talkgroup alias</h2>
+      <form id="aliasForm">
+        <div class="grid">
+          <div><label>Name</label><input name="name" placeholder="Fire Dispatch" required></div>
+          <div><label>Talkgroups (ranges with a dash)</label><input name="talkgroups" class="mono" placeholder="1201, 9000-9099"></div>
+          <div><label>Radio IDs</label><input name="radios" class="mono" placeholder="3101234"></div>
+          <div><label>Alias list</label><input name="list" list="aliasLists" placeholder="County"></div>
+          <div><label>Group</label><input name="group" placeholder="Fire"></div>
+          <div><label>Priority (1 is highest)</label><input name="priority" type="number" min="1" max="100" placeholder="None"></div>
+        </div>
+        <div class="checks">
+          <label><input type="checkbox" name="lockout" value="1"> Lock out (never follow or play)</label>
+          <label><input type="checkbox" name="record" value="1"> Record calls</label>
+          <span style="flex:1"></span>
+          <button class="primary" type="submit">Add alias</button>
+        </div>
+      </form>
+    </div>
+    <div id="aliasList"></div>
+  </section>
+
+  <section id="files" class="hidden">
+    <div class="card">
+      <h2 style="margin-top:0">Import an sdrtrunk playlist</h2>
+      <p class="muted">Pick playlist_v4.xml from sdrtrunk's playlist folder. Merge keeps what's on the phone and adds anything new; replace swaps the whole list.</p>
+      <input type="file" id="importFile" accept=".xml,text/xml,application/xml">
+      <div class="checks"><button id="importMerge" class="primary">Merge into the phone's list</button><button id="importReplace">Replace the phone's list</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Export</h2>
+      <p class="muted">Download the phone's channels and aliases as an sdrtrunk playlist.</p>
+      <button id="export">Download playlist_v4.xml</button>
+    </div>
+  </section>
+  <datalist id="aliasLists"></datalist>
+</main>
+
+<div id="lock"><div class="card">
+  <h2 style="margin-top:0">Enter the PIN</h2>
+  <p class="muted">It's on your phone, under Channels &gt; Web dashboard.</p>
+  <form id="pinForm"><input id="pin" inputmode="numeric" maxlength="6" autocomplete="off" autofocus><button class="primary" type="submit">Connect</button></form>
+  <p id="pinError" style="color:var(--alert)"></p>
+</div></div>
+<div id="toast"></div>
+
+<script>
+let pin = sessionStorage.getItem('sdrnova-pin') || '';
+let state = { channels: [], aliases: [], aliasLists: [] };
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'class') node.className = v; else if (k.startsWith('on')) node.addEventListener(k.slice(2), v); else node.setAttribute(k, v);
+  }
+  for (const child of children) node.append(child instanceof Node ? child : document.createTextNode(child ?? ''));
+  return node;
+}
+
+function toast(text, error) {
+  const t = document.getElementById('toast');
+  t.textContent = text; t.className = error ? 'error' : ''; t.style.display = 'block';
+  clearTimeout(t.timer); t.timer = setTimeout(() => t.style.display = 'none', 3500);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, { ...options, headers: { ...(options.headers || {}), 'X-Pin': pin } });
+  const body = await response.json().catch(() => ({ error: 'The phone sent back something unexpected.' }));
+  if (response.status === 401 || response.status === 429) { showLock(body.error); throw new Error(body.error); }
+  if (!response.ok) { toast(body.error || 'That didn\'t work.', true); throw new Error(body.error); }
+  return body;
+}
+
+function post(path, fields) {
+  return api(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
+}
+
+function showLock(message) {
+  document.getElementById('lock').classList.remove('hidden');
+  document.getElementById('pinError').textContent = pin ? (message || '') : '';
+}
+
+async function load() {
+  render(await api('/api/state'));
+  document.getElementById('lock').classList.add('hidden');
+}
+
+function mhz(hz) { return (hz / 1e6).toFixed(5); }
+
+function render(next) {
+  state = next;
+  const scanning = state.channels.filter(c => c.scan && c.supported).length;
+  document.getElementById('summary').textContent =
+    `${state.channels.length} channels, ${scanning} in scan · ${state.aliases.length} aliases · changes save to the phone right away`;
+  const lists = document.getElementById('aliasLists');
+  lists.replaceChildren(...state.aliasLists.map(l => el('option', { value: l })));
+
+  const channels = document.getElementById('channelList');
+  channels.replaceChildren();
+  if (!state.channels.length) channels.append(el('p', { class: 'muted' }, 'No channels yet. Add one above, or import an sdrtrunk playlist.'));
+  const systems = {};
+  for (const c of state.channels) (systems[c.system || 'Other'] ||= []).push(c);
+  for (const [system, list] of Object.entries(systems)) {
+    channels.append(el('h2', {}, `${system} · ${list.length}`));
+    const rows = list.map(c => el('tr', {},
+      el('td', {}, el('span', { class: 'toggle' + (c.scan ? ' on' : ''), title: 'Include in scan', onclick: () => post('/api/channels/toggle', { index: c.index, key: c.key }).then(render) })),
+      el('td', {}, el('div', {}, c.name), el('div', { class: 'muted' }, c.site)),
+      el('td', { class: 'mono' }, c.frequencies.map(mhz).join(', ')),
+      el('td', {}, el('span', { class: 'chip ' + (c.supported ? c.protocol : 'other') }, c.label + (c.lsm ? ' LSM' : '') + (c.supported ? '' : ' · not yet'))),
+      el('td', { class: 'muted' }, c.aliasList),
+      el('td', {}, el('button', { class: 'danger', onclick: () => confirm(`Remove ${c.name}?`) && post('/api/channels/delete', { index: c.index, key: c.key }).then(render) }, 'Remove')),
+    ));
+    channels.append(el('div', { class: 'card' }, el('table', {},
+      el('tr', {}, el('th', {}, 'Scan'), el('th', {}, 'Name'), el('th', {}, 'Frequency'), el('th', {}, 'Mode'), el('th', {}, 'Aliases'), el('th', {})),
+      ...rows)));
+  }
+
+  const aliases = document.getElementById('aliasList');
+  aliases.replaceChildren();
+  if (!state.aliases.length) { aliases.append(el('p', { class: 'muted' }, 'No aliases yet.')); return; }
+  const rows = state.aliases.map(a => el('tr', {},
+    el('td', {}, a.name, a.group ? el('div', { class: 'muted' }, a.group) : ''),
+    el('td', { class: 'mono' }, a.talkgroups),
+    el('td', { class: 'mono' }, a.radios),
+    el('td', { class: 'muted' }, a.list),
+    el('td', {}, a.lockout ? el('span', { class: 'chip other' }, 'Locked out') : (a.priority ? `Priority ${a.priority}` : ''), a.record ? el('span', { class: 'chip NBFM', style: 'margin-left:6px' }, 'Record') : ''),
+    el('td', {}, el('button', { class: 'danger', onclick: () => confirm(`Remove ${a.name}?`) && post('/api/aliases/delete', { index: a.index, key: a.key }).then(render) }, 'Remove')),
+  ));
+  aliases.append(el('div', { class: 'card' }, el('table', {},
+    el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Talkgroups'), el('th', {}, 'Radios'), el('th', {}, 'List'), el('th', {}, 'Flags'), el('th', {})),
+    ...rows)));
+}
+
+function formFields(form) {
+  const fields = {};
+  for (const [k, v] of new FormData(form).entries()) fields[k] = v;
+  return fields;
+}
+
+document.getElementById('channelForm').addEventListener('submit', e => {
+  e.preventDefault();
+  post('/api/channels', formFields(e.target)).then(s => { render(s); e.target.reset(); toast('Channel added'); });
+});
+document.getElementById('aliasForm').addEventListener('submit', e => {
+  e.preventDefault();
+  post('/api/aliases', formFields(e.target)).then(s => { render(s); e.target.reset(); toast('Alias added'); });
+});
+document.getElementById('pinForm').addEventListener('submit', e => {
+  e.preventDefault();
+  pin = document.getElementById('pin').value.trim();
+  sessionStorage.setItem('sdrnova-pin', pin);
+  load().catch(() => {});
+});
+for (const button of document.querySelectorAll('nav button')) {
+  button.addEventListener('click', () => {
+    for (const b of document.querySelectorAll('nav button')) b.classList.toggle('on', b === button);
+    for (const id of ['channels', 'aliases', 'files']) document.getElementById(id).classList.toggle('hidden', id !== button.dataset.view);
+  });
+}
+async function importFile(merge) {
+  const file = document.getElementById('importFile').files[0];
+  if (!file) { toast('Pick a playlist file first.', true); return; }
+  if (!merge && !confirm('Replace every channel and alias on the phone with this file?')) return;
+  const s = await api('/api/import?merge=' + (merge ? '1' : '0'), { method: 'POST', headers: { 'Content-Type': 'application/xml' }, body: await file.text() });
+  render(s); toast(`Imported. The phone now has ${s.channels.length} channels and ${s.aliases.length} aliases.`);
+}
+document.getElementById('importMerge').addEventListener('click', () => importFile(true).catch(() => {}));
+document.getElementById('importReplace').addEventListener('click', () => importFile(false).catch(() => {}));
+document.getElementById('export').addEventListener('click', () => { window.location = '/api/export?pin=' + encodeURIComponent(pin); });
+
+if (pin) load().catch(() => {}); else showLock();
+</script>
+</body>
+</html>

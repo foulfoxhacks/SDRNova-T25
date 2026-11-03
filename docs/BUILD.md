@@ -15,6 +15,17 @@ Gradle 8.11.1, Android Gradle Plugin 8.7.3 and Kotlin 2.1.0 come in through the 
 ```bash
 ./gradlew :core:test           # DSP and P25 decoder tests, runs on the desktop JVM
 ./gradlew :app:assembleRelease # app/build/outputs/apk/release/app-release.apk
+./gradlew :core:dashboardDemo  # the web dashboard with sample channels on http://127.0.0.1:8025 (PIN 123456)
+```
+
+### RadioReference app key
+
+RadioReference issues a web service key to each application, separately from users' logins. Request one from your
+RadioReference account, then either let users paste it in the app or bundle it at build time (keep it out of git,
+for example in `~/.gradle/gradle.properties`):
+
+```bash
+./gradlew :app:assembleRelease -Prr.appKey=YOUR-KEY
 ```
 
 The release build is signed with the local debug key so it installs directly with `adb install`. Use it rather
@@ -53,6 +64,8 @@ output somewhere short:
 - Voice audio from the built-in JMBE vocoder (IMBE for Phase 1, AMBE+2 for Phase 2 and DMR); see [VOCODER.md](VOCODER.md)
 - Analog NBFM with noise squelch and audio
 - Spectrum and waterfall of the tuner bandwidth; tap to tune. RF gain and volume (dB) apply live from the main screen
+- Web dashboard: Channels > the globe icon serves a page on the phone's Wi-Fi address (or its own hotspot) for adding, editing and removing channels and talkgroup aliases, and importing (merge or replace) or exporting sdrtrunk playlists from a computer. Every change needs a 6-digit PIN shown on the phone that changes each time sharing starts; ten wrong tries lock it for a minute. It never listens on mobile data
+- RadioReference import (Channels > + > From RadioReference): sign in with a Premium Subscription, enter a zip code, and pick a trunked system or a group of conventional frequencies in that county. Trunked systems arrive as one channel per site (control channel first, alternates after, LSM set for simulcast sites, sites in the county ticked for scanning) plus talkgroup aliases grouped by category. Needs an app key (above). The password is only kept if you ask, encrypted with an Android Keystore key
 - sdrtrunk playlist import and export (Channels tab): channels with their system, site, frequencies, decoder and alias list, and aliases with talkgroups, talkgroup ranges, radio IDs, priority, record and "do not monitor". Tap a channel to listen; the dongle retunes when it's outside the band in view
 - Scan: cycles the ticked channels (any mix of P25, DMR and NBFM), stops on a call or open squelch, waits a hang time for the reply, with hold and skip. Dwell and hang are in Setup
 - Alias priority and lockout: locked-out talkgroups aren't followed or played; when every voice channel is busy, a higher-priority grant takes over the lowest-priority call, and it takes the speaker too

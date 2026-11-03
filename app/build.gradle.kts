@@ -17,6 +17,9 @@ android {
         targetSdk = 35
         versionCode = 4
         versionName = "0.4.0"
+        // RadioReference issues each app its own web service key. Build with -Prr.appKey=... (or put rr.appKey in
+        // ~/.gradle/gradle.properties) to bundle one; otherwise users paste their own in the app.
+        buildConfigField("String", "RR_APP_KEY", "\"${(project.findProperty("rr.appKey") as String?).orEmpty()}\"")
     }
 
     buildTypes {
@@ -35,6 +38,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

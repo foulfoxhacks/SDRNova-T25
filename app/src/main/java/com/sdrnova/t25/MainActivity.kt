@@ -16,13 +16,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sdrnova.t25.playlist.Playlist
+import com.sdrnova.t25.playlist.merge
 import com.sdrnova.t25.radio.ConfigStore
 import com.sdrnova.t25.radio.IdStore
-import com.sdrnova.t25.radio.PlaylistStore
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioService
 import com.sdrnova.t25.radio.SourceType
@@ -31,10 +30,10 @@ import com.sdrnova.t25.ui.MainScreen
 import com.sdrnova.t25.ui.SdrNovaTheme
 
 class MainActivity : ComponentActivity() {
-    private val engine get() = (application as SdrNovaApp).engine
+    private val app get() = application as SdrNovaApp
+    private val engine get() = app.engine
+    private val playlists get() = app.playlists
     private lateinit var store: ConfigStore
-    private lateinit var playlists: PlaylistStore
-    private var playlist by mutableStateOf(Playlist.EMPTY)
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { startWithUsbCheck() }
@@ -46,7 +45,7 @@ class MainActivity : ComponentActivity() {
             val result = runCatching { playlists.read(uri) }
             runOnUiThread {
                 result.onSuccess { imported ->
-                    updatePlaylist(imported)
+                    updatePlaylist { imported }
                     toast("Imported ${imported.channels.size} channels and ${imported.aliases.size} aliases")
                 }.onFailure { toast("Couldn't import that file: ${it.message}") }
             }
@@ -81,8 +80,8 @@ class MainActivity : ComponentActivity() {
 
     private val exportPlaylist = registerForActivityResult(ActivityResultContracts.CreateDocument("text/xml")) { uri ->
         if (uri == null) return@registerForActivityResult
-        runCatching { playlists.export(uri, playlist) }
-            .onSuccess { toast("Exported ${playlist.channels.size} channels") }
+        runCatching { playlists.export(uri) }
+            .onSuccess { toast("Exported ${playlists.playlist.channels.size} channels") }
             .onFailure { toast("Couldn't export: ${it.message}") }
     }
 
@@ -101,17 +100,24 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         store = ConfigStore(this)
-        playlists = PlaylistStore(this)
-        playlist = playlists.load()
         ContextCompat.registerReceiver(
             this, usbPermissionReceiver, IntentFilter(ACTION_USB_PERMISSION), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         setContent {
             SdrNovaTheme {
+                val playlist by playlists.flow.collectAsStateWithLifecycle()
+                val dashboard by app.dashboard.state.collectAsStateWithLifecycle()
                 MainScreen(
                     engine = engine,
                     initialConfig = store.load(),
                     playlist = playlist,
+                    dashboard = dashboard,
+                    onDashboard = { on ->
+                        // Binding the socket is network work; keep it off the main thread.
+                        Thread { if (on) app.dashboard.start() else app.dashboard.stop() }.start()
+                    },
+                    radioReference = app.radioReference,
+                    onAddPlaylist = { added -> updatePlaylist { it.merge(added) } },
                     onStart = ::start,
                     onStop = { RadioService.stop(this) },
                     onLiveChange = { config ->
@@ -125,7 +131,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onImportPlaylist = { importPlaylist.launch(arrayOf("text/xml", "application/xml", "*/*")) },
                     onExportPlaylist = { exportPlaylist.launch("playlist_v4.xml") },
-                    onPlaylistChange = ::updatePlaylist,
+                    onPlaylistChange = { updated -> updatePlaylist { updated } },
                     onImportIds = { importIds.launch(arrayOf("text/*", "application/octet-stream", "*/*")) },
                     onExportGroups = { exportGroups.launch("DSDPlus.groups") },
                     onExportRadios = { exportRadios.launch("DSDPlus.radios") },
@@ -146,13 +152,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun updatePlaylist(updated: Playlist) {
-        runCatching { playlists.save(updated) }.onFailure {
-            toast("Couldn't save the channel list: ${it.message}")
-            return
-        }
-        playlist = updated
-        engine.playlistChanged()
+    private fun updatePlaylist(transform: (Playlist) -> Playlist) {
+        runCatching { playlists.update(transform) }.onFailure { toast("Couldn't save the channel list: ${it.message}") }
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()

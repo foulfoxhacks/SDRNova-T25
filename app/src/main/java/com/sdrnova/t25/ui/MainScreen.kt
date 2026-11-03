@@ -1,6 +1,7 @@
 package com.sdrnova.t25.ui
 
 import android.os.SystemClock
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -26,7 +27,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sdrnova.t25.playlist.Playlist
+import com.sdrnova.t25.radio.DashboardState
 import com.sdrnova.t25.radio.RadioConfig
+import com.sdrnova.t25.radio.RadioReferenceAccount
 import com.sdrnova.t25.radio.RadioEngine
 import com.sdrnova.t25.radio.Tuning
 import kotlinx.coroutines.delay
@@ -44,6 +47,12 @@ fun MainScreen(
     engine: RadioEngine,
     initialConfig: RadioConfig,
     playlist: Playlist,
+    /** The Wi-Fi web dashboard: whether it's on, and its address and PIN. */
+    dashboard: DashboardState,
+    onDashboard: (Boolean) -> Unit,
+    radioReference: RadioReferenceAccount,
+    /** Merges channels and aliases from RadioReference into the list, skipping ones already there. */
+    onAddPlaylist: (Playlist) -> Unit,
     onStart: (RadioConfig) -> Unit,
     onStop: () -> Unit,
     onSave: (RadioConfig) -> Unit,
@@ -84,6 +93,8 @@ fun MainScreen(
         onLiveChange(updated)
     }
     var screen by rememberSaveable { mutableStateOf(Screen.SCANNER) }
+    var showRadioReference by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showRadioReference) { showRadioReference = false }
     val now by produceState(SystemClock.elapsedRealtime()) {
         while (true) {
             delay(500)
@@ -114,6 +125,10 @@ fun MainScreen(
         },
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
+            if (showRadioReference) {
+                RadioReferenceScreen(radioReference, onAdd = onAddPlaylist, onClose = { showRadioReference = false })
+                return@Box
+            }
             when (screen) {
                 Screen.SCANNER -> ScannerScreen(
                     status = status,
@@ -140,6 +155,9 @@ fun MainScreen(
                     status = status,
                     onImport = onImportPlaylist,
                     onExport = onExportPlaylist,
+                    dashboard = dashboard,
+                    onDashboard = onDashboard,
+                    onRadioReference = { showRadioReference = true },
                     onPick = { channel ->
                         Tuning.of(channel)?.let { tuning ->
                             live(

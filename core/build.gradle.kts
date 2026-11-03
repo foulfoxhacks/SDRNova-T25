@@ -30,3 +30,10 @@ tasks.test {
         showStandardStreams = true
     }
 }
+
+/** Serves the web dashboard on http://127.0.0.1:8025 with sample channels (PIN 123456), for working on the page. */
+tasks.register<JavaExec>("dashboardDemo") {
+    group = "application"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.sdrnova.t25.web.DashboardDemoKt")
+}

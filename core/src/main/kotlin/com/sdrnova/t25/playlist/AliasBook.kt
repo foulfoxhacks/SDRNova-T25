@@ -4,13 +4,20 @@ import com.sdrnova.t25.receiver.CallPolicy
 
 /**
  * Talkgroup and radio lookups for the radio: names, priority, lockout and recording, from playlist aliases plus the
- * quick "id,name" entries typed in Setup (which win when both name the same talkgroup).
+ * quick "id,name" entries typed in Setup (which win when both name the same talkgroup). [heard] adds the DSD+-style
+ * lists last: their names fill gaps, their lockouts always apply, and their priorities count where nothing else set one.
  */
-class AliasBook(aliases: List<PlaylistAlias>, names: Map<Int, String> = emptyMap()) : CallPolicy {
+class AliasBook(
+    aliases: List<PlaylistAlias>,
+    names: Map<Int, String> = emptyMap(),
+    heard: HeardIds.Snapshot = HeardIds.Snapshot.EMPTY,
+) : CallPolicy {
     private val talkgroups = HashMap<Int, PlaylistAlias>()
     private val talkgroupRanges = ArrayList<Pair<IntRange, PlaylistAlias>>()
     private val radios = HashMap<Int, PlaylistAlias>()
     private val radioRanges = ArrayList<Pair<IntRange, PlaylistAlias>>()
+    private val heardLockouts = HashSet<Int>()
+    private val heardPriorities = HashMap<Int, Int>()
 
     init {
         for (alias in aliases) {
@@ -25,6 +32,24 @@ class AliasBook(aliases: List<PlaylistAlias>, names: Map<Int, String> = emptyMap
             talkgroups[id] = talkgroups[id]?.copy(name = name)
                 ?: PlaylistAlias(name, null, null, null, listOf(id..id), emptyList(), priority = null, record = false)
         }
+        for (entry in heard.groups) {
+            if (entry.lockout) heardLockouts += entry.id
+            if (entry.priority != HeardIds.DEFAULT_PRIORITY) heardPriorities.putIfAbsent(entry.id, entry.priority)
+            if (entry.alias.isNotEmpty()) {
+                talkgroups.putIfAbsent(
+                    entry.id,
+                    PlaylistAlias(entry.alias, null, null, null, listOf(entry.id..entry.id), emptyList(), priority = null, record = false),
+                )
+            }
+        }
+        for (entry in heard.radios) {
+            if (entry.alias.isNotEmpty()) {
+                radios.putIfAbsent(
+                    entry.id,
+                    PlaylistAlias(entry.alias, null, null, null, emptyList(), listOf(entry.id..entry.id), priority = null, record = false),
+                )
+            }
+        }
     }
 
     val isEmpty: Boolean get() = talkgroups.isEmpty() && talkgroupRanges.isEmpty() && radios.isEmpty() && radioRanges.isEmpty()
@@ -37,10 +62,11 @@ class AliasBook(aliases: List<PlaylistAlias>, names: Map<Int, String> = emptyMap
     fun radioName(radio: Int): String? = (radios[radio] ?: radioRanges.firstOrNull { radio in it.first }?.second)?.name
 
     /** sdrtrunk's "do not monitor": never followed or played, though grants still show in the log. */
-    fun lockedOut(talkgroup: Int): Boolean = alias(talkgroup)?.lockedOut == true
+    fun lockedOut(talkgroup: Int): Boolean = alias(talkgroup)?.lockedOut == true || talkgroup in heardLockouts
 
     /** 1 is highest; talkgroups without a priority rank below every listed one. */
-    fun priority(talkgroup: Int): Int = alias(talkgroup)?.priority?.takeIf { it > 0 } ?: UNLISTED_PRIORITY
+    fun priority(talkgroup: Int): Int =
+        alias(talkgroup)?.priority?.takeIf { it > 0 } ?: heardPriorities[talkgroup] ?: UNLISTED_PRIORITY
 
     fun record(talkgroup: Int): Boolean = alias(talkgroup)?.record == true
 

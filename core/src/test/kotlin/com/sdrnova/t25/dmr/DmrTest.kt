@@ -73,7 +73,12 @@ class DmrTest {
     }
 
     @Test
-    fun `decodes a DMR repeater call from raw I-Q`() {
+    fun `decodes a DMR repeater call from raw I-Q`() = decodesRepeaterCall(Mode.DMR)
+
+    @Test
+    fun `auto mode recognises and decodes the same DMR call`() = decodesRepeaterCall(Mode.AUTO)
+
+    private fun decodesRepeaterCall(mode: Mode) {
         val random = Random(8)
         val frames = List(3) { ByteArray(9).also(random::nextBytes) }
         val idle = Bptc196.encode(ByteArray(12))
@@ -106,7 +111,7 @@ class DmrTest {
         val log = ArrayList<String>()
         var ambe = 0
         var lastFrame: ByteArray? = null
-        val receiver = TrunkedReceiver(rate, centerHz, channelHz, Mode.DMR, maxTrafficChannels = 0,
+        val receiver = TrunkedReceiver(rate, centerHz, channelHz, mode, maxTrafficChannels = 0,
             listener = object : TrunkedReceiver.Listener {
                 override fun onDmrEvent(event: DmrEvent) {
                     events += event
@@ -150,5 +155,6 @@ class DmrTest {
         assertEquals(listOf("end of transmission"), ended)
         assertTrue(log.any { "talkgroup voice grant: TG 4242 from 777 on LCN 5" in it }, "CSBK grant logged")
         assertTrue(events.count { it is DmrEvent.Idle && it.timeslot == 2 } >= 10)
+        assertEquals(Mode.DMR, receiver.control.detectedMode)
     }
 }

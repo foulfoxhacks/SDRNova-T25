@@ -68,6 +68,7 @@ class ReceiverTest {
             offset += length
         }
         result.afcHz = receiver.afcHz
+        result.detected = receiver.detectedMode
         return result
     }
 
@@ -77,6 +78,7 @@ class ReceiverTest {
         val messages = ArrayList<TsbkMessage>()
         val audio = ArrayList<Short>()
         var afcHz = 0.0
+        var detected: Mode? = null
     }
 
     private fun controlChannel(frames: Int, random: Random): Pair<IntArray, Int> {
@@ -131,6 +133,17 @@ class ReceiverTest {
             assertTrue(abs(result.afcHz - offset) < 100, "AFC should settle on $offset Hz, got ${result.afcHz}")
         }
     }
+    @Test
+    fun `auto mode recognises and decodes a P25 control channel`() {
+        val random = Random(42)
+        val (dibits, sent) = controlChannel(frames = 30, random = random)
+        val iq = SignalGenerator.modulate(dibits, inputRate, channelOffset + 250.0, snrDb = 20.0, random = random)
+        val result = run(iq, mode = Mode.AUTO)
+        println("auto: syncs=${result.syncs} messages=${result.messages.size}/$sent crcFailures=${result.crcFailures} detected=${result.detected}")
+        assertTrue(result.messages.size >= sent - 3, "decoded ${result.messages.size} of $sent TSBKs")
+        assertEquals(Mode.P25_PHASE1, result.detected)
+    }
+
     @Test
     fun `decodes at lower SNR`() {
         val random = Random(5)

@@ -153,6 +153,11 @@ class TrunkedReceiver(
         }
     }
 
+    /** Ends one call now, as when the listener skips it. */
+    fun end(id: Int, reason: String) {
+        traffic.firstOrNull { it.id == id }?.let { release(it, reason) }
+    }
+
     /** Ends every call, as when the radio moves elsewhere. */
     fun releaseAll(reason: String) {
         for (channel in traffic.toList()) release(channel, reason)

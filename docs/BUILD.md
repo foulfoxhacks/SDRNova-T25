@@ -58,6 +58,11 @@ output somewhere short:
 - Alias priority and lockout: locked-out talkgroups aren't followed or played; when every voice channel is busy, a higher-priority grant takes over the lowest-priority call, and it takes the speaker too
 - Call recording to WAV in Music/SDRNova T25: off, talkgroups marked record (sdrtrunk's alias flag), or every call (NBFM included, one file per squelch opening)
 - Heard-calls history across channels, a shareable event log, and a one-tap ppm correction from the AFC once the control channel is locked
+- DSD+-style features:
+  - Auto mode runs the P25 and DMR demodulators side by side on one frequency and decodes whichever is there, showing what it found
+  - Talkgroups and radios are listed as they're heard, with hit counts and last-heard times (Calls → Groups / Radios). Name them, set a priority (lower plays first, 50 is the default) or lock them out. The lists import and export as `DSDPlus.groups` and `DSDPlus.radios`
+  - Hold, Skip and Lock out on the call being played: hold follows and plays only that talkgroup, skip drops the call until it's over, lock out adds it to the groups list as L/O
+  - A decode-quality meter from sync bit errors and frame checks
 
 ## Not yet
 

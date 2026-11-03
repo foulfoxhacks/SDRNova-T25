@@ -28,6 +28,9 @@ enum class Mode(val label: String, val selectable: Boolean = true) {
     DMR("DMR"),
     NBFM("Analog NBFM"),
 
+    /** P25 Phase 1 and DMR demodulators side by side, as DSD+ does: whichever finds its sync decodes. */
+    AUTO("Auto (P25 or DMR)"),
+
     /** Phase 2 TDMA voice carriers, reached by following grants from a Phase 1 control channel. */
     P25_PHASE2("P25 Phase 2 TDMA", selectable = false),
 }
@@ -138,7 +141,8 @@ class ChannelReceiver(
         }
         val (pass, stop) = when (mode) {
             Mode.P25_PHASE1 -> 5_200.0 to 6_500.0
-            Mode.DMR -> 5_800.0 to 7_500.0
+            // Auto keeps DMR's slightly wider filter; P25 C4FM fits inside it.
+            Mode.DMR, Mode.AUTO -> 5_800.0 to 7_500.0
             Mode.NBFM -> 6_000.0 to 8_500.0
             // H-DQPSK at 6000 baud with alpha 0.2 occupies ±3.6 kHz; the RRC matched filter does the rest.
             Mode.P25_PHASE2 -> 4_800.0 to 6_500.0
@@ -170,6 +174,10 @@ class ChannelReceiver(
             Mode.P25_PHASE1 -> if (simulcast) lsm.process(work, count) else demodulator.process(work, count)
             Mode.P25_PHASE2 -> dqpsk.process(work, count)
             Mode.DMR -> dmrDemodulator.process(work, count)
+            Mode.AUTO -> {
+                demodulator.process(work, count)
+                dmrDemodulator.process(work, count)
+            }
             Mode.NBFM -> {
                 if (audio.size < count) audio = ShortArray(count)
                 nbfm.process(work, count, audio)
@@ -178,7 +186,13 @@ class ChannelReceiver(
         }
     }
 
+    /** What's actually on the channel: [mode] itself, or in [Mode.AUTO] the protocol last decoded (null until one is). */
+    val detectedMode: Mode? get() = if (mode == Mode.AUTO) detected else mode
+    private var detected: Mode? = null
+
     private fun onFramerEvent(event: P25Event) {
+        // A decoded NID, not just a sync pattern, is what proves the channel is P25.
+        if (event is P25Event.Nid) detected = Mode.P25_PHASE1
         if (event is P25Event.Sync && !simulcast) {
             // Pull the carrier into the middle of the channel filter.
             afcHz = (afcHz + 0.5 * event.frequencyErrorHz).coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
@@ -209,6 +223,7 @@ class ChannelReceiver(
     }
 
     private fun onDmrEvent(event: DmrEvent) {
+        if (event !is DmrEvent.Sync) detected = Mode.DMR
         if (event is DmrEvent.Sync) {
             afcHz = (afcHz + 0.5 * event.frequencyErrorHz).coerceIn(-AFC_LIMIT_HZ, AFC_LIMIT_HZ)
             updateMixer()

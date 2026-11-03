@@ -113,6 +113,7 @@ fun modeColor(mode: Mode): Color = when (mode) {
     Mode.P25_PHASE1, Mode.P25_PHASE2 -> Cyan
     Mode.DMR -> Violet
     Mode.NBFM -> GoodText
+    Mode.AUTO -> SkyBlue
 }
 
 fun modeShort(mode: Mode, simulcast: Boolean = false): String = when (mode) {
@@ -120,7 +121,11 @@ fun modeShort(mode: Mode, simulcast: Boolean = false): String = when (mode) {
     Mode.P25_PHASE2 -> "P25 P2"
     Mode.DMR -> "DMR"
     Mode.NBFM -> "NBFM"
+    Mode.AUTO -> "Auto"
 }
+
+/** The protocol to show: what Auto found once it has, otherwise the mode itself. */
+fun shownMode(mode: Mode, detected: Mode?): Mode = if (mode == Mode.AUTO) detected ?: Mode.AUTO else mode
 
 /** m:ss for call timers. */
 fun duration(seconds: Long): String = "%d:%02d".format(seconds / 60, seconds % 60)

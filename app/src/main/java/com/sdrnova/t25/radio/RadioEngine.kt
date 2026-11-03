@@ -10,8 +10,10 @@ import com.sdrnova.t25.p25.IdentifierUpdate
 import com.sdrnova.t25.p25.Ldu
 import com.sdrnova.t25.p25.P25Event
 import com.sdrnova.t25.playlist.AliasBook
+import com.sdrnova.t25.playlist.HeardIds
 import com.sdrnova.t25.playlist.Playlist
 import com.sdrnova.t25.playlist.PlaylistChannel
+import com.sdrnova.t25.receiver.CallPolicy
 import com.sdrnova.t25.receiver.ChannelReceiver
 import com.sdrnova.t25.receiver.Mode
 import com.sdrnova.t25.receiver.TrunkedReceiver
@@ -48,6 +50,8 @@ data class EngineStatus(
     val centerHz: Long = 0,
     val sampleRate: Int = 0,
     val mode: Mode = Mode.P25_PHASE1,
+    /** The protocol actually decoding: [mode] itself, or what Auto found (null while it's still looking). */
+    val detectedMode: Mode? = null,
     val simulcast: Boolean = false,
     val channelName: String = "",
     val vocoder: String? = null,
@@ -61,6 +65,10 @@ data class EngineStatus(
     val droppedBuffers: Long = 0,
     /** A call is up or the squelch is open. */
     val busy: Boolean = false,
+    /** How cleanly frames are decoding, 0..1, from sync bit errors and frame checks; negative with no signal. */
+    val quality: Float = -1f,
+    /** Only this talkgroup is followed and played while set. */
+    val heldTalkgroup: Int? = null,
     val scanning: Boolean = false,
     val scanHold: Boolean = false,
     /** 1-based position in the scan list. */
@@ -146,6 +154,17 @@ class RadioEngine(private val context: Context) {
     /** Names, priorities and lockouts for the channel being listened to. */
     val aliases: StateFlow<AliasBook> = _aliases
 
+    private val idStore = IdStore(context)
+    private val heardIds: HeardIds = idStore.load()
+    private val _ids = MutableStateFlow(heardIds.snapshot())
+    private val idSaver = Executors.newSingleThreadExecutor()
+
+    /** DSD+-style lists of every talkgroup and radio heard, with hits, names, priorities and lockouts. */
+    val ids: StateFlow<HeardIds.Snapshot> = _ids
+
+    @Volatile
+    private var held: Int? = null
+
     /** Called on an engine thread once everything has stopped, whether asked to or because of an error. */
     var onStopped: (() -> Unit)? = null
 
@@ -164,6 +183,7 @@ class RadioEngine(private val context: Context) {
             _trunking.value = TrunkingView()
             _log.value = emptyList()
             _spectrum.value = null
+            held = null
             session = Session(config).also { it.launch() }
         }
     }
@@ -205,6 +225,57 @@ class RadioEngine(private val context: Context) {
 
     /** The saved playlist changed: reload aliases and the scan list. */
     fun playlistChanged() = post { reloadPlaylist() }
+
+    /** Follows and plays only [talkgroup] until released with null, like DSD+'s hold. */
+    fun hold(talkgroup: Int?) {
+        held = talkgroup
+        _status.value = _status.value.copy(heldTalkgroup = talkgroup)
+        post { applyHold() }
+    }
+
+    /** Drops the call that has the speaker; its talkgroup stays skipped until that call is over. */
+    fun skipCall() = post { skipPlaying() }
+
+    /** Locks [talkgroup] out on the network being heard, in the groups list, and ends any call on it. */
+    fun lockout(talkgroup: Int) = post { lockoutHere(talkgroup) }
+
+    fun updateGroup(entry: HeardIds.Entry) {
+        heardIds.updateGroup(entry.protocol, entry.network, entry.id) { entry }
+        idsEdited()
+    }
+
+    fun updateRadio(entry: HeardIds.Entry) {
+        heardIds.updateRadio(entry.protocol, entry.network, entry.id) { entry }
+        idsEdited()
+    }
+
+    fun removeGroup(entry: HeardIds.Entry) {
+        heardIds.removeGroup(entry.key)
+        idsEdited()
+    }
+
+    fun removeRadio(entry: HeardIds.Entry) {
+        heardIds.removeRadio(entry.key)
+        idsEdited()
+    }
+
+    /** Folds in a DSD+ groups or radios file; returns how many lines it read. */
+    fun importIds(text: String): Int = heardIds.import(text).also { idsEdited() }
+
+    fun groupsFile(): String = heardIds.groupsFile()
+
+    fun radiosFile(): String = heardIds.radiosFile()
+
+    /** Names, priorities or lockouts changed: save, and rebuild what the radio and screens use. */
+    private fun idsEdited() {
+        _ids.value = heardIds.snapshot()
+        saveIds()
+        post { rebuildAliases() }
+    }
+
+    private fun saveIds() {
+        idSaver.execute { runCatching { idStore.save(heardIds) }.onFailure { Log.w(TAG, "couldn't save the groups lists", it) } }
+    }
 
     private fun post(command: Session.() -> Unit) {
         synchronized(lock) { session }?.post(command)
@@ -250,6 +321,23 @@ class RadioEngine(private val context: Context) {
             private set
         private var arrivalPending = false
         private var syncSinceUpdate = false
+        private var quality = -1f
+        private var dmrColorCode: Int? = null
+        private var idsDirty = false
+        private var lastIdSave = 0L
+        private val skipped = HashMap<Int, Long>()
+
+        /** Hold and skip from the screen, on top of the alias lockouts and priorities. */
+        private val policy = object : CallPolicy {
+            override fun follow(talkgroup: Int, unitToUnit: Boolean): Boolean {
+                val hold = held
+                if (hold != null && (unitToUnit || talkgroup != hold)) return false
+                if (!unitToUnit && skipping(talkgroup)) return false
+                return aliases.follow(talkgroup, unitToUnit)
+            }
+
+            override fun priority(talkgroup: Int, unitToUnit: Boolean): Int = aliases.priority(talkgroup, unitToUnit)
+        }
 
         /** Samples processed, the scanner's clock. */
         private var streamSamples = 0L
@@ -345,6 +433,7 @@ class RadioEngine(private val context: Context) {
                     runCatching { it.setBiasTee(false) }
                     runCatching { it.close() }
                 }
+                saveIds()
                 ended(this, error)
             }
         }
@@ -412,12 +501,12 @@ class RadioEngine(private val context: Context) {
             centerHz = centerHz,
             controlHz = target.frequencyHz,
             mode = target.mode,
-            maxTrafficChannels = if (target.mode == Mode.P25_PHASE1) config.maxTrafficChannels else 0,
+            maxTrafficChannels = if (target.mode == Mode.P25_PHASE1 || target.mode == Mode.AUTO) config.maxTrafficChannels else 0,
             listener = listener,
         ).also {
             it.control.squelchThreshold = config.squelch
             it.simulcast = target.simulcast
-            it.policy = bookFor(target.aliasList)
+            it.policy = policy
         }
 
         fun resetAfc() {
@@ -447,7 +536,7 @@ class RadioEngine(private val context: Context) {
             if (target.mode == old.mode && inView) {
                 old.retune(target.frequencyHz)
                 old.simulcast = target.simulcast
-                old.policy = bookFor(target.aliasList)
+                old.policy = policy
             } else {
                 old.releaseAll("retuned")
                 if (!inView) {
@@ -522,18 +611,81 @@ class RadioEngine(private val context: Context) {
 
         fun reloadPlaylist() {
             playlist = playlists.load()
-            books.clear()
-            aliases = bookFor(tuning.aliasList)
-            _aliases.value = aliases
-            receiver.policy = aliases
+            rebuildAliases()
             val previous = scanner ?: return
             startScan()
             scanner?.hold = previous.hold
             publishScan()
         }
 
+        fun rebuildAliases() {
+            books.clear()
+            aliases = bookFor(tuning.aliasList)
+            _aliases.value = aliases
+        }
+
         private fun bookFor(list: String?): AliasBook =
-            books.getOrPut(list.orEmpty()) { AliasBook(playlist.aliasesIn(list), config.aliases) }
+            books.getOrPut(list.orEmpty()) { AliasBook(playlist.aliasesIn(list), config.aliases, heardIds.snapshot()) }
+
+        private val streamMs: Long get() = streamSamples * 1000 / iq.sampleRate
+
+        /** A skipped talkgroup stays skipped while its call goes on (grants and voice keep refreshing it), then clears. */
+        private fun skipping(talkgroup: Int): Boolean {
+            val until = skipped[talkgroup] ?: return false
+            if (streamMs > until) {
+                skipped.remove(talkgroup)
+                return false
+            }
+            skipped[talkgroup] = streamMs + SKIP_HANG_MS
+            return true
+        }
+
+        fun skipPlaying() {
+            val calls = receiver.trafficChannels
+            val call = calls.firstOrNull { it.id == playingChannel } ?: calls.firstOrNull() ?: return
+            if (!call.unitToUnit) skipped[call.talkgroup] = streamMs + SKIP_HANG_MS
+            addLog(withAliases("Skipped ${label(call)}"))
+            receiver.end(call.id, "skipped")
+        }
+
+        fun applyHold() {
+            val hold = held
+            addLog(withAliases(if (hold == null) "Hold released" else "Holding on TG $hold"))
+            if (hold == null) return
+            for (call in receiver.trafficChannels) {
+                if (call.unitToUnit || call.talkgroup != hold) receiver.end(call.id, "not the held talkgroup")
+            }
+        }
+
+        fun lockoutHere(talkgroup: Int) {
+            val (protocol, network) = network()
+            heardIds.updateGroup(protocol, network, talkgroup) { it.copy(lockout = true) }
+            _ids.value = heardIds.snapshot()
+            saveIds()
+            rebuildAliases()
+            addLog(withAliases("Locked out TG $talkgroup"))
+            for (call in receiver.trafficChannels) {
+                if (!call.unitToUnit && call.talkgroup == talkgroup) receiver.end(call.id, "locked out")
+            }
+        }
+
+        /** DSD+'s protocol and network ID for what's on the air: WACN.system or the NAC for P25, the colour code for DMR. */
+        private fun network(): Pair<String, String> {
+            if (receiver.control.detectedMode == Mode.DMR) return "DMR" to (dmrColorCode ?: 0).toString()
+            val site = receiver.tracker.site
+            val wacn = site.wacn
+            val system = site.system
+            return "P25" to when {
+                wacn != null && system != null -> "%05X.%03X".format(wacn, system)
+                receiver.control.nac >= 0 -> "%03X".format(receiver.control.nac)
+                else -> "0"
+            }
+        }
+
+        /** Folds one frame's outcome (1 clean, 0 failed) into the quality meter. */
+        private fun rate(sample: Float) {
+            quality = if (quality < 0f) sample else quality + QUALITY_SMOOTHING * (sample - quality)
+        }
 
         private inner class Listener : TrunkedReceiver.Listener {
             override fun onControlEvent(event: P25Event) {
@@ -542,18 +694,33 @@ class RadioEngine(private val context: Context) {
                         syncs++
                         lastSyncAt = SystemClock.elapsedRealtime()
                         syncSinceUpdate = true
+                        rate(1f - event.bitErrors / SYNC_ERROR_SCALE)
                     }
-                    is P25Event.Message -> messages++
-                    is P25Event.CrcFailed -> crcErrors++
+                    is P25Event.Nid -> rate(1f)
+                    is P25Event.NidFailed -> rate(0f)
+                    is P25Event.Message -> {
+                        messages++
+                        rate(1f)
+                    }
+                    is P25Event.CrcFailed -> {
+                        crcErrors++
+                        rate(0f)
+                    }
                     else -> Unit
                 }
             }
 
             override fun onDmrEvent(event: DmrEvent) {
-                if (event is DmrEvent.Sync) {
-                    syncs++
-                    lastSyncAt = SystemClock.elapsedRealtime()
-                    syncSinceUpdate = true
+                when (event) {
+                    is DmrEvent.Sync -> {
+                        syncs++
+                        lastSyncAt = SystemClock.elapsedRealtime()
+                        syncSinceUpdate = true
+                        rate(1f - event.bitErrors / SYNC_ERROR_SCALE)
+                    }
+                    is DmrEvent.LinkControl -> dmrColorCode = event.colorCode
+                    is DmrEvent.Csbk -> dmrColorCode = event.colorCode
+                    else -> Unit
                 }
             }
 
@@ -587,7 +754,7 @@ class RadioEngine(private val context: Context) {
                 create: (VocoderProvider) -> VoiceDecoder?,
             ) {
                 val provider = vocoder ?: return
-                if (channel.encrypted || lockedOut(channel)) return
+                if (channel.encrypted || !policy.follow(channel.talkgroup, channel.unitToUnit)) return
                 val speaker = takeSpeaker(channel)
                 val recorder = if (shouldRecord(channel)) {
                     recorders.getOrPut(channel.id) { CallRecorder(8_000, recordingTitle(channel)) }
@@ -623,6 +790,13 @@ class RadioEngine(private val context: Context) {
                 // Every voice frame is 20 ms, Phase 1 or 2.
                 val seconds = channel.voiceFrames / 50
                 addLog(withAliases("${label(channel)} ended after ${seconds}s ($reason)"))
+                if (channel.voiceFrames > 0 && receiver.mode != Mode.NBFM) {
+                    val (protocol, network) = network()
+                    val now = System.currentTimeMillis()
+                    if (!channel.unitToUnit && channel.talkgroup != 0) heardIds.heardGroup(protocol, network, channel.talkgroup, now)
+                    channel.source?.let { heardIds.heardRadio(protocol, network, it, channel.talkgroup, now) }
+                    idsDirty = true
+                }
                 if (channel.voiceFrames > 0) {
                     heard.addFirst(
                         HeardCall(
@@ -634,8 +808,6 @@ class RadioEngine(private val context: Context) {
                 }
             }
         }
-
-        private fun lockedOut(channel: TrunkedReceiver.TrafficChannel) = !channel.unitToUnit && aliases.lockedOut(channel.talkgroup)
 
         private fun shouldRecord(channel: TrunkedReceiver.TrafficChannel) = when (config.recordMode) {
             RecordMode.OFF -> false
@@ -710,7 +882,18 @@ class RadioEngine(private val context: Context) {
 
         private fun publish() {
             val control = receiver.control
+            val synced = SystemClock.elapsedRealtime() - lastSyncAt < 2_000
+            if (idsDirty) {
+                idsDirty = false
+                _ids.value = heardIds.snapshot()
+                if (SystemClock.elapsedRealtime() - lastIdSave > 15_000) {
+                    lastIdSave = SystemClock.elapsedRealtime()
+                    saveIds()
+                }
+            }
             _status.value = _status.value.copy(
+                detectedMode = control.detectedMode,
+                quality = if (synced) quality else -1f,
                 signalDbfs = control.signalDbfs,
                 afcHz = control.afcHz,
                 nac = control.nac,
@@ -746,6 +929,13 @@ class RadioEngine(private val context: Context) {
     companion object {
         private const val TAG = "RadioEngine"
         private val TALKGROUP = Regex("TG (\\d+)")
+
+        /** A skipped talkgroup comes back this long after its last grant or voice frame. */
+        private const val SKIP_HANG_MS = 4_000L
+        private const val QUALITY_SMOOTHING = 0.08f
+
+        /** Sync bit errors that count as a fully failed frame on the quality meter. */
+        private const val SYNC_ERROR_SCALE = 8f
         private val UNSAFE_FILE_CHARACTERS = Regex("[^A-Za-z0-9._-]+")
         private val FILE_TIME = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
         private const val MIN_RECORDING_SECONDS = 1.0

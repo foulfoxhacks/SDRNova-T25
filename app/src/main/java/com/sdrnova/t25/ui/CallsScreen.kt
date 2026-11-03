@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sdrnova.t25.playlist.AliasBook
+import com.sdrnova.t25.playlist.HeardIds
 import com.sdrnova.t25.radio.LogLine
 import com.sdrnova.t25.radio.TrunkingView
 import com.sdrnova.t25.trunking.Call
@@ -45,18 +46,43 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class CallsView(val label: String) { HEARD("Heard"), GRANTS("Grants"), LOG("Event log") }
+private enum class CallsView(val label: String) {
+    HEARD("Heard"),
+    GRANTS("Grants"),
+    GROUPS("Groups"),
+    RADIOS("Radios"),
+    LOG("Log"),
+}
 
-/** Everything that happened: calls decoded, grants seen on the control channel, and the event log. */
+/**
+ * Everything that happened: calls decoded, grants seen on the control channel, the DSD+-style talkgroup and radio
+ * lists, and the event log.
+ */
 @Composable
-fun CallsScreen(trunking: TrunkingView, aliases: AliasBook, log: List<LogLine>, running: Boolean) {
+fun CallsScreen(
+    trunking: TrunkingView,
+    aliases: AliasBook,
+    log: List<LogLine>,
+    running: Boolean,
+    ids: HeardIds.Snapshot,
+    held: Int?,
+    idActions: HeardIdActions,
+) {
     var view by rememberSaveable { mutableStateOf(CallsView.HEARD) }
     val context = LocalContext.current
     Column(Modifier.fillMaxSize().background(Canvas)) {
         ScreenBar(
             title = "Calls",
-            subtitle = "${trunking.heard.size} heard · ${trunking.recent.size} grants · ${log.size} events",
+            subtitle = "${trunking.heard.size} heard · ${ids.groups.size} groups · ${ids.radios.size} radios · ${log.size} events",
         ) {
+            if (view == CallsView.GROUPS || view == CallsView.RADIOS) {
+                IconButton(onClick = idActions.onImport) {
+                    Icon(Glyphs.Import, contentDescription = "Import a DSD+ groups or radios file", tint = Cyan)
+                }
+                IconButton(onClick = if (view == CallsView.GROUPS) idActions.onExportGroups else idActions.onExportRadios) {
+                    Icon(Glyphs.Export, contentDescription = "Export as a DSD+ file", tint = Cyan)
+                }
+            }
             if (view == CallsView.LOG && log.isNotEmpty()) {
                 IconButton(onClick = {
                     val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -68,7 +94,7 @@ fun CallsScreen(trunking: TrunkingView, aliases: AliasBook, log: List<LogLine>, 
                 }) { Icon(Icons.Filled.Share, contentDescription = "Share event log", tint = Cyan) }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             CallsView.entries.forEach { option ->
                 val selected = option == view
                 Text(
@@ -79,8 +105,9 @@ fun CallsScreen(trunking: TrunkingView, aliases: AliasBook, log: List<LogLine>, 
                         .clickable { view = option }
                         .padding(vertical = 8.dp),
                     color = if (selected) Cyan else Ink,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
             }
@@ -110,6 +137,8 @@ fun CallsScreen(trunking: TrunkingView, aliases: AliasBook, log: List<LogLine>, 
                     items(trunking.recent) { GrantRow(it, aliases, live = false) }
                 }
             }
+            CallsView.GROUPS -> HeardIdList(ids.groups, radios = false, held = held, actions = idActions)
+            CallsView.RADIOS -> HeardIdList(ids.radios, radios = true, held = held, actions = idActions)
             CallsView.LOG -> LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 if (log.isEmpty()) item { EmptyNote("Decoded messages and call events appear here.") }
                 items(log) { line ->

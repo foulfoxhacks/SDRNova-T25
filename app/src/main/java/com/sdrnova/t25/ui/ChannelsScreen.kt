@@ -63,7 +63,8 @@ fun ChannelsScreen(
     var removing by remember { mutableStateOf<PlaylistChannel?>(null) }
     val active = status.running || status.starting
     val hereHz = if (active) status.frequencyHz else config.frequencyHz
-    val hereMode = if (active) status.mode else config.mode
+    // A channel added while Auto is decoding gets the protocol Auto found.
+    val hereMode = if (active) shownMode(status.mode, status.detectedMode) else config.mode
     val scannable = playlist.channels.count { it.enabled && Tuning.of(it) != null }
     val empty = playlist.channels.isEmpty() && playlist.aliases.isEmpty()
 

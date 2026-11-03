@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.sdrnova.t25.playlist.Playlist
 import com.sdrnova.t25.radio.ConfigStore
+import com.sdrnova.t25.radio.IdStore
 import com.sdrnova.t25.radio.PlaylistStore
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RadioService
@@ -50,6 +51,32 @@ class MainActivity : ComponentActivity() {
                 }.onFailure { toast("Couldn't import that file: ${it.message}") }
             }
         }.start()
+    }
+
+    private val importIds = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        Thread {
+            val result = runCatching { engine.importIds(IdStore(this).read(uri)) }
+            runOnUiThread {
+                result.onSuccess { lines ->
+                    toast(if (lines == 0) "No DSD+ groups or radios lines in that file" else "Read $lines DSD+ lines")
+                }.onFailure { toast("Couldn't import that file: ${it.message}") }
+            }
+        }.start()
+    }
+
+    private val exportGroups = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        runCatching { IdStore(this).export(uri, engine.groupsFile()) }
+            .onSuccess { toast("Exported the groups list") }
+            .onFailure { toast("Couldn't export: ${it.message}") }
+    }
+
+    private val exportRadios = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        runCatching { IdStore(this).export(uri, engine.radiosFile()) }
+            .onSuccess { toast("Exported the radios list") }
+            .onFailure { toast("Couldn't export: ${it.message}") }
     }
 
     private val exportPlaylist = registerForActivityResult(ActivityResultContracts.CreateDocument("text/xml")) { uri ->
@@ -99,6 +126,9 @@ class MainActivity : ComponentActivity() {
                     onImportPlaylist = { importPlaylist.launch(arrayOf("text/xml", "application/xml", "*/*")) },
                     onExportPlaylist = { exportPlaylist.launch("playlist_v4.xml") },
                     onPlaylistChange = ::updatePlaylist,
+                    onImportIds = { importIds.launch(arrayOf("text/*", "application/octet-stream", "*/*")) },
+                    onExportGroups = { exportGroups.launch("DSDPlus.groups") },
+                    onExportRadios = { exportRadios.launch("DSDPlus.radios") },
                     onSave = { config ->
                         store.save(config)
                         if (engine.status.value.running) {

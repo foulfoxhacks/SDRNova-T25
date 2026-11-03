@@ -76,13 +76,17 @@ fun ScannerScreen(
     onScanHold: (Boolean) -> Unit,
     onScanSkip: () -> Unit,
     onShowCalls: () -> Unit,
+    /** Hold on a talkgroup (null releases), skip the call playing, lock a talkgroup out: DSD+'s call keys. */
+    onHold: (Int?) -> Unit,
+    onSkipCall: () -> Unit,
+    onLockout: (Int) -> Unit,
 ) {
     var showLevels by rememberSaveable { mutableStateOf(false) }
     val heard = trunking.heard.take(25)
     LazyColumn(Modifier.fillMaxSize().background(Canvas)) {
         item { StatusStrip(status, config, now, onStart, onStop, onLiveChange) }
         item { InfoPanel(status, trunking, config, now, onLiveChange) }
-        item { NowPlaying(status, trunking, aliases, config) }
+        item { NowPlaying(status, trunking, aliases, config, onHold, onSkipCall, onLockout) }
         item {
             ControlRow(
                 status = status,
@@ -128,14 +132,24 @@ private fun StatusStrip(
     val mode = if (active) status.mode else config.mode
     val locked = status.lastSyncAt > 0 && now - status.lastSyncAt < 2_000
     val place = "${status.scanPosition} of ${status.scanSize}"
+    val lockedLabel = when (shownMode(mode, status.detectedMode)) {
+        Mode.DMR -> if (mode == Mode.AUTO) "Auto: DMR locked" else "DMR signal locked"
+        Mode.AUTO -> "Auto: signal locked"
+        else -> if (mode == Mode.AUTO) "Auto: P25 locked" else "Control channel locked"
+    }
+    val searchingLabel = when (mode) {
+        Mode.DMR -> "Searching for DMR sync"
+        Mode.AUTO -> "Auto: searching for P25 or DMR"
+        else -> "Searching for P25 sync"
+    }
     val (dot, label) = when {
         status.starting -> Amber to "Starting…"
         status.running && status.scanning && status.scanHold -> Amber to "Scan held · $place"
         status.running && status.scanning && status.busy -> Good to "Stopped on activity · $place"
         status.running && status.scanning -> Amber to "Scanning $place"
         status.running && mode == Mode.NBFM -> (if (status.busy) Good else Teal) to if (status.busy) "Receiving" else "Listening"
-        status.running && locked -> Good to if (mode == Mode.DMR) "DMR signal locked" else "Control channel locked"
-        status.running -> Amber to if (mode == Mode.DMR) "Searching for DMR sync" else "Searching for P25 sync"
+        status.running && locked -> Good to lockedLabel
+        status.running -> Amber to searchingLabel
         else -> Muted to "Stopped"
     }
     Column(Modifier.fillMaxWidth().background(Panel)) {
@@ -214,8 +228,14 @@ private fun InfoPanel(status: EngineStatus, trunking: TrunkingView, config: Radi
             Text("%.5f MHz".format(frequency / 1e6), color = Ink, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
             Spacer(Modifier.width(8.dp))
             Chip(modeShort(mode, simulcast), modeColor(mode))
+            val detected = status.detectedMode
+            if (mode == Mode.AUTO && active && detected != null) {
+                Spacer(Modifier.width(6.dp))
+                Chip("→ " + modeShort(detected), modeColor(detected))
+            }
         }
-        if (mode == Mode.P25_PHASE1 || mode == Mode.P25_PHASE2) {
+        val protocol = if (active) shownMode(mode, status.detectedMode) else mode
+        if (protocol == Mode.P25_PHASE1 || protocol == Mode.P25_PHASE2) {
             InfoRow(Glyphs.Tag, Teal) {
                 val parts = listOfNotNull(
                     "NAC " + if (status.nac >= 0) "%03X".format(status.nac) else "—",
@@ -232,6 +252,26 @@ private fun InfoPanel(status: EngineStatus, trunking: TrunkingView, config: Radi
                 Text("%.0f dBFS".format(status.signalDbfs), color = Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
             } else {
                 Text("No signal · press start", color = Muted, fontSize = 13.sp)
+            }
+        }
+        if (status.running && status.quality >= 0f) {
+            // DSD+-style decode quality: sync bit errors and frame checks, smoothed.
+            val color = when {
+                status.quality >= 0.85f -> Good
+                status.quality >= 0.6f -> Amber
+                else -> Alert
+            }
+            InfoRow(Glyphs.Checked, color) {
+                Text("Decode", color = Muted, fontSize = 12.sp)
+                Spacer(Modifier.width(10.dp))
+                LevelBar(status.quality, color, Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                Text("%3d%%".format((status.quality * 100).roundToInt()), color = Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+        status.heldTalkgroup?.let { tg ->
+            InfoRow(Glyphs.Pause, Amber) {
+                Text("Holding on TG $tg: other talkgroups are skipped", color = Amber, fontSize = 13.sp, modifier = Modifier.weight(1f))
             }
         }
         if (status.running && mode == Mode.P25_PHASE1) {
@@ -258,14 +298,32 @@ private fun InfoPanel(status: EngineStatus, trunking: TrunkingView, config: Radi
 
 /** The call that has the speaker, in big type like a scanner's display. */
 @Composable
-private fun NowPlaying(status: EngineStatus, trunking: TrunkingView, aliases: AliasBook, config: RadioConfig) {
+private fun NowPlaying(
+    status: EngineStatus,
+    trunking: TrunkingView,
+    aliases: AliasBook,
+    config: RadioConfig,
+    onHold: (Int?) -> Unit,
+    onSkipCall: () -> Unit,
+    onLockout: (Int) -> Unit,
+) {
     val call = trunking.following.firstOrNull { it.playing } ?: trunking.following.firstOrNull()
     val others = trunking.following.filter { it !== call }
     PanelCard(Modifier.padding(top = 4.dp)) {
         when {
-            call != null -> ActiveCall(call, status, aliases)
+            call != null -> {
+                ActiveCall(call, status, aliases)
+                CallKeys(call, status.heldTalkgroup, onHold, onSkipCall, onLockout)
+            }
             status.running && status.mode == Mode.NBFM && status.busy -> AnalogActivity(status, config)
-            else -> IdleDisplay(status)
+            else -> {
+                IdleDisplay(status)
+                status.heldTalkgroup?.let { tg ->
+                    Row(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp)) {
+                        ControlButton("Release hold on TG $tg", Glyphs.Pause, true, Modifier.weight(1f)) { onHold(null) }
+                    }
+                }
+            }
         }
         if (others.isNotEmpty()) {
             Text(
@@ -295,7 +353,8 @@ private fun ActiveCall(call: FollowedCall, status: EngineStatus, aliases: AliasB
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Chip(modeShort(status.mode, status.simulcast), modeColor(status.mode))
+        val protocol = shownMode(status.mode, status.detectedMode)
+        Chip(modeShort(protocol, status.simulcast), modeColor(protocol))
         call.timeslot?.let { Chip("TS$it", SkyBlue) }
         when {
             call.encrypted -> Chip("Encrypted", Amber)
@@ -346,6 +405,32 @@ private fun ActiveCall(call: FollowedCall, status: EngineStatus, aliases: AliasB
             .padding(horizontal = 14.dp, vertical = 6.dp),
         color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
     )
+}
+
+/** Hold, skip and lock out the call on screen, like DSD+'s call keys. */
+@Composable
+private fun CallKeys(
+    call: FollowedCall,
+    held: Int?,
+    onHold: (Int?) -> Unit,
+    onSkipCall: () -> Unit,
+    onLockout: (Int) -> Unit,
+) {
+    val holding = held != null && held == call.talkgroup
+    Row(
+        Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (!call.unitToUnit && call.talkgroup != 0) {
+            ControlButton(if (holding) "Release" else "Hold", Glyphs.Pause, holding, Modifier.weight(1f)) {
+                onHold(if (holding) null else call.talkgroup)
+            }
+        }
+        ControlButton("Skip", Glyphs.SkipNext, false, Modifier.weight(1f), onSkipCall)
+        if (!call.unitToUnit && call.talkgroup != 0) {
+            ControlButton("Lock out", Glyphs.Blocked, false, Modifier.weight(1f)) { onLockout(call.talkgroup) }
+        }
+    }
 }
 
 @Composable

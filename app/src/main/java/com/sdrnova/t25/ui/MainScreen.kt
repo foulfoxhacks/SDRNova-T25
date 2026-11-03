@@ -52,12 +52,29 @@ fun MainScreen(
     onImportPlaylist: () -> Unit,
     onExportPlaylist: () -> Unit,
     onPlaylistChange: (Playlist) -> Unit,
+    /** Import a DSD+ groups or radios file; export each list as one. */
+    onImportIds: () -> Unit,
+    onExportGroups: () -> Unit,
+    onExportRadios: () -> Unit,
 ) {
     val status by engine.status.collectAsStateWithLifecycle()
     val trunking by engine.trunking.collectAsStateWithLifecycle()
     val log by engine.log.collectAsStateWithLifecycle()
     val spectrum by engine.spectrum.collectAsStateWithLifecycle()
     val aliases by engine.aliases.collectAsStateWithLifecycle()
+    val ids by engine.ids.collectAsStateWithLifecycle()
+    val idActions = remember(engine) {
+        HeardIdActions(
+            onSaveGroup = engine::updateGroup,
+            onSaveRadio = engine::updateRadio,
+            onRemoveGroup = engine::removeGroup,
+            onRemoveRadio = engine::removeRadio,
+            onHold = engine::hold,
+            onImport = onImportIds,
+            onExportGroups = onExportGroups,
+            onExportRadios = onExportRadios,
+        )
+    }
     var config by remember { mutableStateOf(initialConfig) }
     // The waterfall keeps filling while other screens are showing.
     val waterfall = remember { WaterfallImage() }
@@ -110,8 +127,13 @@ fun MainScreen(
                     onScanHold = engine::setScanHold,
                     onScanSkip = engine::skip,
                     onShowCalls = { screen = Screen.CALLS },
+                    onHold = engine::hold,
+                    onSkipCall = engine::skipCall,
+                    onLockout = engine::lockout,
                 )
-                Screen.CALLS -> CallsScreen(trunking, aliases, log, running = status.running)
+                Screen.CALLS -> CallsScreen(
+                    trunking, aliases, log, running = status.running, ids = ids, held = status.heldTalkgroup, idActions = idActions,
+                )
                 Screen.CHANNELS -> ChannelsScreen(
                     playlist = playlist,
                     config = config,

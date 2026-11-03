@@ -1,6 +1,7 @@
 package com.sdrnova.t25.receiver
 
 import com.sdrnova.t25.dmr.Dmr
+import com.sdrnova.t25.dmr.DmrGrant
 import com.sdrnova.t25.dmr.DmrEvent
 import com.sdrnova.t25.p25.CallTermination
 import com.sdrnova.t25.p25.Channel
@@ -77,7 +78,7 @@ class TrunkedReceiver(
         internal lateinit var receiver: ChannelReceiver
     }
 
-    /** One demodulator per Phase 2 carrier, shared by the calls on its two timeslots. */
+    /** One demodulator per Phase 2 or trunked DMR carrier, shared by the calls on its two timeslots. */
     private class Carrier(val receiver: ChannelReceiver) {
         val channels = HashMap<Int, TrafficChannel>()
     }
@@ -87,6 +88,9 @@ class TrunkedReceiver(
 
     /** Lockouts and priorities, usually from the alias list. */
     var policy: CallPolicy = CallPolicy.ALL
+
+    /** DMR logical channel number to downlink frequency, for following Tier III grants; empty logs them only. */
+    var dmrChannelMap: Map<Int, Long> = emptyMap()
 
     /** The channel the main decoder listens to; [retune] moves it within the tuner's bandwidth. */
     var controlHz: Long = controlHz
@@ -205,19 +209,53 @@ class TrunkedReceiver(
         val frequency = band.downlinkHz(channel.number)
         val timeslot = if (band.slotsPerCarrier > 1) channel.number % band.slotsPerCarrier + 1 else null
         val label = (if (unitToUnit) "private call to $id" else "TG $id") + (timeslot?.let { " (TDMA slot $it)" } ?: "")
+        when {
+            band.slotsPerCarrier > 2 -> notice("p2-$id", "$label is on a 4-slot TDMA channel, which isn't decoded yet")
+            timeslot != null && scrambleParameters() == null -> notice(
+                "scramble", "Waiting for the network status broadcast (WACN and system) before following Phase 2 calls",
+            )
+            else -> admit(frequency, timeslot, id, source, encrypted, unitToUnit, label) {
+                start(frequency, timeslot, id, source, unitToUnit)
+            }
+        }
+    }
+
+    /** A DMR Tier III grant: the channel map says where its logical channel is. */
+    private fun allocateDmr(grant: DmrGrant) {
+        val label = (if (grant.privateCall) "private call to ${grant.target}" else "TG ${grant.target}") +
+            " (LCN ${grant.lcn} TS${grant.timeslot})"
+        val frequency = dmrChannelMap[grant.lcn] ?: return notice(
+            "lcn-${grant.lcn}", "$label: LCN ${grant.lcn} isn't in the DMR channel map, so the call can't be followed",
+        )
+        // Calls on the monitored frequency itself are decoded already.
+        if (frequency == controlHz) return
+        admit(frequency, grant.timeslot, grant.target, grant.source, false, grant.privateCall, label) {
+            startDmr(frequency, grant.timeslot, grant.target, grant.source, grant.privateCall)
+        }
+    }
+
+    /** What every grant goes through before it gets a voice channel. */
+    private fun admit(
+        frequency: Long,
+        timeslot: Int?,
+        id: Int,
+        source: Int?,
+        encrypted: Boolean,
+        unitToUnit: Boolean,
+        label: String,
+        start: () -> Unit,
+    ) {
         val existing = traffic.firstOrNull { it.frequencyHz == frequency && it.timeslot == timeslot }
         if (existing != null) {
             existing.talkgroup = id
-            if (source != null && source != 0) existing.source = source
+            // Repeated grants name the radio that asked for the channel; the call's own link control, once heard,
+            // names whoever is talking now, so it wins.
+            if (existing.source == null && source != null && source != 0) existing.source = source
             return
         }
         when {
             // Grant updates keep coming briefly after a call's terminator; don't reopen the channel for them.
             streamTimeMs < (cooldownUntil[cooldownKey(frequency, timeslot)] ?: 0L) -> Unit
-            band.slotsPerCarrier > 2 -> notice("p2-$id", "$label is on a 4-slot TDMA channel, which isn't decoded yet")
-            timeslot != null && scrambleParameters() == null -> notice(
-                "scramble", "Waiting for the network status broadcast (WACN and system) before following Phase 2 calls",
-            )
             !policy.follow(id, unitToUnit) -> notice("lock-$id", "$label is locked out; not following")
             encrypted -> notice("enc-$id", "$label is encrypted; not following")
             abs(frequency - centerHz) > usableHalfBandwidthHz -> notice(
@@ -229,12 +267,49 @@ class TrunkedReceiver(
                 val weakest = followed().maxByOrNull { policy.priority(it.talkgroup, it.unitToUnit) }
                 if (weakest != null && policy.priority(weakest.talkgroup, weakest.unitToUnit) > policy.priority(id, unitToUnit)) {
                     release(weakest, "preempted by $label")
-                    start(frequency, timeslot, id, source, unitToUnit)
+                    start()
                 } else {
                     notice("busy-$id", "$label missed: all $maxTrafficChannels voice channels busy")
                 }
             }
-            else -> start(frequency, timeslot, id, source, unitToUnit)
+            else -> start()
+        }
+    }
+
+    private fun startDmr(frequency: Long, timeslot: Int, id: Int, source: Int?, unitToUnit: Boolean) {
+        val channel = TrafficChannel(nextId++, frequency, timeslot, unitToUnit, id, source?.takeIf { it != 0 }, streamTimeMs)
+        val carrier = carriers.getOrPut(frequency) {
+            val receiver = ChannelReceiver(inputRate, Mode.DMR, object : ChannelReceiver.Listener {
+                override fun onDmrEvent(event: DmrEvent) = onDmrTraffic(frequency, event)
+            })
+            receiver.channelOffsetHz = (frequency - centerHz).toDouble()
+            receiver.presetAfc(control.afcHz * frequency / controlHz)
+            Carrier(receiver)
+        }
+        carrier.channels[timeslot] = channel
+        channel.receiver = carrier.receiver
+        traffic += channel
+        listener.onTrafficStart(channel)
+    }
+
+    /** Voice and link control on a trunked DMR voice channel, for the timeslot it was granted. */
+    private fun onDmrTraffic(frequency: Long, event: DmrEvent) {
+        val channel = carriers[frequency]?.channels?.get(event.timeslot) ?: return
+        when (event) {
+            is DmrEvent.LinkControl -> {
+                val lc = event.lc
+                if (!lc.isVoice) return
+                if (event.terminator) return release(channel, "end of transmission")
+                channel.lastActivityMs = streamTimeMs
+                if (lc.source != 0) channel.source = lc.source
+                if (lc.options.encrypted) channel.encrypted = true
+            }
+            is DmrEvent.Voice -> {
+                channel.lastActivityMs = streamTimeMs
+                channel.voiceFrames += event.frames.size
+                if (!channel.encrypted) listener.onTrafficAmbe(channel, event.frames)
+            }
+            else -> Unit
         }
     }
 
@@ -306,7 +381,10 @@ class TrunkedReceiver(
                 channel.voiceFrames += event.frames.size
                 if (!channel.encrypted) listener.onTrafficAmbe(channel, event.frames)
             }
-            is DmrEvent.Csbk -> listener.onLog("DMR TS$slot CC${event.colorCode}: ${Dmr.describe(event)}")
+            is DmrEvent.Csbk -> {
+                listener.onLog("DMR TS$slot CC${event.colorCode}: ${Dmr.describe(event)}")
+                if (maxTrafficChannels > 0) Dmr.grant(event)?.let(::allocateDmr)
+            }
             else -> Unit
         }
     }

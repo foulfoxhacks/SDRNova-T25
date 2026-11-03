@@ -4,6 +4,7 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import android.os.SystemClock
 import android.util.Log
+import com.sdrnova.t25.dmr.DmrChannelMap
 import com.sdrnova.t25.dmr.DmrEvent
 import com.sdrnova.t25.dsp.SpectrumAnalyzer
 import com.sdrnova.t25.p25.IdentifierUpdate
@@ -22,6 +23,7 @@ import com.sdrnova.t25.source.IqSource
 import com.sdrnova.t25.source.RtlTcpSource
 import com.sdrnova.t25.source.UsbRadios
 import com.sdrnova.t25.trunking.Call
+import com.sdrnova.t25.trunking.ControlChannelHunter
 import com.sdrnova.t25.trunking.Neighbor
 import com.sdrnova.t25.trunking.SiteInfo
 import com.sdrnova.t25.trunking.TrunkingTracker
@@ -322,6 +324,8 @@ class RadioEngine(private val context: Context) {
         private var arrivalPending = false
         private var syncSinceUpdate = false
         private var quality = -1f
+        private var hunter: ControlChannelHunter? = null
+        private var huntSync = false
         private var dmrColorCode: Int? = null
         private var idsDirty = false
         private var lastIdSave = 0L
@@ -462,6 +466,7 @@ class RadioEngine(private val context: Context) {
         private fun process() {
             playlist = playlists.load()
             receiver = newReceiver(tuning)
+            startHunting(tuning)
             ensureAudio()
             reloadPlaylist()
             if (config.scan) startScan()
@@ -488,6 +493,7 @@ class RadioEngine(private val context: Context) {
                     analyzer.compute(floats, samples)?.let { _spectrum.value = it }
                 }
                 scan()
+                hunt()
                 sincePublish += samples
                 if (sincePublish >= publishEvery) {
                     sincePublish = 0
@@ -496,17 +502,63 @@ class RadioEngine(private val context: Context) {
             }
         }
 
-        private fun newReceiver(target: Tuning) = TrunkedReceiver(
-            inputRate = iq.sampleRate,
-            centerHz = centerHz,
-            controlHz = target.frequencyHz,
-            mode = target.mode,
-            maxTrafficChannels = if (target.mode == Mode.P25_PHASE1 || target.mode == Mode.AUTO) config.maxTrafficChannels else 0,
-            listener = listener,
-        ).also {
-            it.control.squelchThreshold = config.squelch
-            it.simulcast = target.simulcast
-            it.policy = policy
+        private fun newReceiver(target: Tuning): TrunkedReceiver {
+            val dmrMap = dmrMapFor(target)
+            val follows = when (target.mode) {
+                Mode.P25_PHASE1, Mode.AUTO -> true
+                // DMR grants carry only a logical channel number; without a map there's nowhere to follow them.
+                Mode.DMR -> dmrMap.isNotEmpty()
+                else -> false
+            }
+            return TrunkedReceiver(
+                inputRate = iq.sampleRate,
+                centerHz = centerHz,
+                controlHz = target.frequencyHz,
+                mode = target.mode,
+                maxTrafficChannels = if (follows) config.maxTrafficChannels else 0,
+                listener = listener,
+            ).also {
+                it.control.squelchThreshold = config.squelch
+                it.simulcast = target.simulcast
+                it.policy = policy
+                it.dmrChannelMap = dmrMap
+            }
+        }
+
+        /** The playlist channel [target] was picked from, if it was. */
+        private fun channelFor(target: Tuning): PlaylistChannel? =
+            if (target.name.isEmpty()) null
+            else playlist.channels.firstOrNull { it.name == target.name && target.frequencyHz in it.frequencies }
+
+        /** The picked channel's sdrtrunk timeslot map, with the one typed in Settings on top. */
+        private fun dmrMapFor(target: Tuning): Map<Int, Long> =
+            channelFor(target)?.dmrChannels.orEmpty() + DmrChannelMap.parse(config.dmrChannelMap)
+
+        /** P25 control channels get a hunter, seeded with the playlist's alternates for the channel. */
+        private fun startHunting(target: Tuning) {
+            hunter = if (target.mode == Mode.P25_PHASE1 || target.mode == Mode.AUTO) {
+                ControlChannelHunter(target.frequencyHz).also {
+                    it.learn(channelFor(target)?.frequencies.orEmpty())
+                    it.arrived(streamMs)
+                }
+            } else {
+                null
+            }
+            huntSync = false
+        }
+
+        /** DSD+-style: when the control channel goes quiet, try the site's other control channels in turn. */
+        private fun hunt() {
+            val hunter = hunter ?: return
+            if (scanner != null || receiver.control.detectedMode == Mode.DMR) return
+            if (huntSync) {
+                huntSync = false
+                hunter.sync(streamMs)
+            }
+            val next = hunter.update(streamMs) ?: return
+            addLog("No control channel on ${TrunkingTracker.mhz(tuning.frequencyHz)}; trying ${TrunkingTracker.mhz(next)}")
+            retarget(tuning.copy(frequencyHz = next), hunting = true)
+            hunter.arrived(streamMs)
         }
 
         fun resetAfc() {
@@ -528,7 +580,7 @@ class RadioEngine(private val context: Context) {
          * Listens to [target]: inside the band in view and in the same mode, the decoder just moves; otherwise the
          * dongle retunes (placing the channel off its DC spike) and a fresh receiver starts.
          */
-        fun retarget(target: Tuning) {
+        fun retarget(target: Tuning, hunting: Boolean = false) {
             if (target == tuning) return
             finishAnalogRecording()
             val old = receiver
@@ -555,6 +607,7 @@ class RadioEngine(private val context: Context) {
                 frequencyHz = target.frequencyHz, centerHz = centerHz, mode = target.mode, channelName = target.name,
                 simulcast = target.simulcast, nac = -1, error = null,
             )
+            if (!hunting) startHunting(target)
         }
 
         fun startScan() {
@@ -694,6 +747,7 @@ class RadioEngine(private val context: Context) {
                         syncs++
                         lastSyncAt = SystemClock.elapsedRealtime()
                         syncSinceUpdate = true
+                        huntSync = true
                         rate(1f - event.bitErrors / SYNC_ERROR_SCALE)
                     }
                     is P25Event.Nid -> rate(1f)
@@ -882,6 +936,7 @@ class RadioEngine(private val context: Context) {
 
         private fun publish() {
             val control = receiver.control
+            hunter?.learn(receiver.tracker.controlChannels())
             val synced = SystemClock.elapsedRealtime() - lastSyncAt < 2_000
             if (idsDirty) {
                 idsDirty = false

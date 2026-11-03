@@ -76,17 +76,18 @@ output somewhere short:
   - Talkgroups and radios are listed as they're heard, with hit counts and last-heard times (Calls → Groups / Radios). Name them, set a priority (lower plays first, 50 is the default) or lock them out. The lists import and export as `DSDPlus.groups` and `DSDPlus.radios`
   - Hold, Skip and Lock out on the call being played: hold follows and plays only that talkgroup, skip drops the call until it's over, lock out adds it to the groups list as L/O
   - A decode-quality meter from sync bit errors and frame checks
+  - Control channel hunting: when a P25 control channel goes quiet, the radio tries the site's other control channels (from its status and secondary control channel broadcasts, and the playlist's alternate frequencies) in turn until one has sync
+  - DMR Tier III trunking: voice grants are followed onto their logical channel and timeslot using a channel map, either sdrtrunk's timeslot map imported with the playlist channel or `LCN, MHz` lines in Settings
 
 ## Not yet
 
-- Rotating through a P25 control channel's alternate frequencies (they're imported and shown, but only the first is used)
 - AM, conventional (single-frequency) Phase 2, and the other sdrtrunk decoders: their channels import but show as not decoded
 - Streaming (Broadcastify, Icecast) and sdrtrunk's per-channel event log and recording settings
 
 - HDU decoding and TDULC link control (both are only used as call boundaries for now)
 - AMBTC opcodes other than the group voice grant are logged by name only; packet data PDUs are skipped
 - Phase 2 on 4-slot (25 kHz) TDMA bands, Phase 2 LCCH control channels, and Phase 2 encryption sync (ESS) details
-- DMR trunking (Tier III, Capacity Plus, Connect Plus): grants are decoded and logged, but following them needs a logical-channel-to-frequency map, which isn't configurable yet. Embedded link control (late entry), data packets and talker alias aren't decoded
+- DMR Capacity Plus and Connect Plus trunking (their vendor control messages aren't decoded), Tier III absolute-frequency grants, embedded link control (late entry), data packets and talker alias
 - E4000 over USB (sdrtrunk's driver is ~1,300 lines of gain and filter tables; still to port). FC0012 and FC2580 have no sdrtrunk implementation to follow. All three work through `rtl_tcp`, which drives them with librtlsdr on the server side.
 
 ## Credits

@@ -50,6 +50,7 @@ class TrunkingTracker(private val now: () -> Long = System::currentTimeMillis) {
     private val active = LinkedHashMap<Long, Call>()
     private val history = ArrayDeque<Call>()
     private val neighbors = LinkedHashMap<Int, Neighbor>()
+    private val secondaryChannels = LinkedHashSet<Channel>()
 
     var site = SiteInfo()
         private set
@@ -61,6 +62,10 @@ class TrunkingTracker(private val now: () -> Long = System::currentTimeMillis) {
     fun bandPlan(): List<IdentifierUpdate> = bands.values.sortedBy { it.identifier }
 
     fun neighbors(): List<Neighbor> = neighbors.values.toList()
+
+    /** This site's control channels as it announces them: the one in its status broadcast, then the secondaries. */
+    fun controlChannels(): List<Long> =
+        (listOfNotNull(site.controlChannelHz) + secondaryChannels.mapNotNull(::frequencyOf)).distinct()
 
     /** Updates state from [message] and returns a one-line description for the message log. */
     fun onMessage(message: TsbkMessage): String = when (message) {
@@ -102,8 +107,10 @@ class TrunkingTracker(private val now: () -> Long = System::currentTimeMillis) {
             neighbors[key] = Neighbor(message.rfss, message.site, message.system, frequencyOf(message.channel), now())
             "Neighbor RFSS ${message.rfss} site ${message.site} on ${describe(message.channel)}"
         }
-        is SecondaryControlChannel ->
+        is SecondaryControlChannel -> {
+            secondaryChannels += message.channels
             "Secondary control " + message.channels.joinToString(", ") { describe(it) }
+        }
         is GroupAffiliationResponse -> "Affiliation ${unit(message.target)} to TG ${message.group}"
         is UnitRegistrationResponse -> "Registration ${unit(message.sourceAddress)}"
         is OtherTsbk -> message.name

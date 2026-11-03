@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sdrnova.t25.dmr.DmrChannelMap
 import com.sdrnova.t25.radio.RadioConfig
 import com.sdrnova.t25.radio.RecordMode
 import com.sdrnova.t25.radio.SourceType
@@ -79,6 +80,23 @@ fun SettingsScreen(config: RadioConfig, onChange: (RadioConfig) -> Unit, onSave:
                 Label("Voice channels followed at once: " + if (config.maxTrafficChannels == 0) "off" else config.maxTrafficChannels.toString())
                 StyledSlider(config.maxTrafficChannels.toFloat(), 0f..4f, steps = 3) {
                     onChange(config.copy(maxTrafficChannels = it.roundToInt()))
+                }
+                if (config.mode == Mode.DMR || config.mode == Mode.AUTO) {
+                    OutlinedTextField(
+                        value = config.dmrChannelMap,
+                        onValueChange = { onChange(config.copy(dmrChannelMap = it)) },
+                        label = { Text("DMR channel map") },
+                        placeholder = { Text("1, 451.1125\n2, 451.6125") },
+                        supportingText = {
+                            Text(
+                                "One \"LCN, MHz\" line per repeater, to follow Tier III grants. " +
+                                    "${DmrChannelMap.parse(config.dmrChannelMap).size} channels read. sdrtrunk " +
+                                    "playlists bring their own map with the channel.",
+                            )
+                        },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
 

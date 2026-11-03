@@ -3,6 +3,8 @@ package com.sdrnova.t25.dmr
 import com.sdrnova.t25.dsp.SampleFormat
 import com.sdrnova.t25.p25.Bits
 import com.sdrnova.t25.p25.SignalGenerator
+import com.sdrnova.t25.playlist.PlaylistImporter
+import com.sdrnova.t25.playlist.PlaylistWriter
 import com.sdrnova.t25.receiver.Mode
 import com.sdrnova.t25.receiver.TrunkedReceiver
 import org.junit.jupiter.api.Assertions.assertArrayEquals
@@ -51,6 +53,134 @@ class DmrTest {
         Bits.setField(block, 56, 24, source.toLong())
         DmrCrc.fillCsbk(block)
         return Bptc196.encode(block)
+    }
+
+    private class TierThree(
+        val calls: List<TrunkedReceiver.TrafficChannel>,
+        val ambe: Int,
+        val ended: List<String>,
+        val log: List<String>,
+    )
+
+    /** A Tier III control channel granting TG 4242 on LCN 5 TS1, and that voice channel carrying the call. */
+    private fun tierThree(channelMap: Map<Int, Long>): TierThree {
+        val random = Random(12)
+        val frames = List(3) { ByteArray(9).also(random::nextBytes) }
+        val idle = Bptc196.encode(ByteArray(12))
+        fun idleSlot(timeslot: Int) = slot(timeslot, DmrSync.BS_DATA, idle, (1 shl 4) or DmrFramer.DATA_IDLE, null).toList()
+
+        val control = ArrayList<Int>()
+        repeat(300) { control += random.nextInt(4) }
+        repeat(8) { control += idleSlot(if (it % 2 == 0) 2 else 1) }
+        repeat(40) {
+            control += if (it % 2 == 0) idleSlot(2) else {
+                slot(1, DmrSync.BS_DATA, csbkGrant(5, 4242, 777), (1 shl 4) or DmrFramer.DATA_CSBK, null).toList()
+            }
+        }
+
+        val ts1 = ArrayList<List<Int>>()
+        ts1 += slot(1, DmrSync.BS_DATA, linkControl(false, 4242, 1234567), (1 shl 4) or DmrFramer.DATA_VOICE_HEADER, null).toList()
+        repeat(2) { for (letter in 0 until 6) ts1 += slot(1, if (letter == 0) DmrSync.BS_VOICE else null, null, null, frames).toList() }
+        ts1 += slot(1, DmrSync.BS_DATA, linkControl(true, 4242, 1234567), (1 shl 4) or DmrFramer.DATA_TERMINATOR, null).toList()
+        repeat(4) { ts1 += idleSlot(1) }
+        val traffic = ArrayList<Int>()
+        repeat(300) { traffic += random.nextInt(4) }
+        // Idle bursts until well after the grant, so the voice channel's receiver is locked before the call starts.
+        repeat(20) { traffic += idleSlot(if (it % 2 == 0) 2 else 1) }
+        for (burst in ts1) {
+            traffic += idleSlot(2)
+            traffic += burst
+        }
+
+        val rate = 960_000
+        val centerHz = 450_150_000L
+        val controlHz = 450_000_000L
+        val trafficHz = 450_250_000L
+        val iq = SignalGenerator.combine(
+            listOf(
+                SignalGenerator.carrier(SignalGenerator.deviation(control.toIntArray()), rate, (controlHz - centerHz) + 200.0),
+                SignalGenerator.carrier(SignalGenerator.deviation(traffic.toIntArray()), rate, (trafficHz - centerHz) - 250.0),
+            ),
+            rate, snrDb = 20.0, amplitude = 0.25, random = random,
+        )
+
+        val calls = ArrayList<TrunkedReceiver.TrafficChannel>()
+        val ended = ArrayList<String>()
+        val log = ArrayList<String>()
+        var ambe = 0
+        val receiver = TrunkedReceiver(rate, centerHz, controlHz, Mode.DMR, maxTrafficChannels = 2,
+            listener = object : TrunkedReceiver.Listener {
+                override fun onTrafficStart(channel: TrunkedReceiver.TrafficChannel) {
+                    calls += channel
+                }
+
+                override fun onTrafficAmbe(channel: TrunkedReceiver.TrafficChannel, frames: List<ByteArray>) {
+                    ambe += frames.size
+                }
+
+                override fun onTrafficEnd(channel: TrunkedReceiver.TrafficChannel, reason: String) {
+                    ended += reason
+                }
+
+                override fun onLog(text: String) {
+                    log += text
+                }
+            })
+        receiver.dmrChannelMap = channelMap
+        val floats = FloatArray(32_768)
+        var offset = 0
+        while (offset < iq.size) {
+            val length = minOf(32_768, iq.size - offset)
+            val count = SampleFormat.UNSIGNED_8.toFloat(iq.copyOfRange(offset, offset + length), length, floats)
+            receiver.process(floats, count)
+            offset += length
+        }
+        println("tier III: calls=${calls.map { "${it.frequencyHz} TS${it.timeslot} TG${it.talkgroup} src ${it.source}" }} ambe=$ambe ended=$ended")
+        return TierThree(calls, ambe, ended, log)
+    }
+
+    @Test
+    fun `follows a Tier III grant onto its voice channel`() {
+        val result = tierThree(mapOf(5 to 450_250_000L))
+        assertEquals(1, result.calls.size)
+        val call = result.calls[0]
+        assertEquals(450_250_000L, call.frequencyHz)
+        assertEquals(1, call.timeslot)
+        assertEquals(4242, call.talkgroup)
+        assertEquals(1234567, call.source, "the voice header's source replaces the grant's")
+        assertEquals(36, result.ambe)
+        assertEquals(listOf("end of transmission"), result.ended)
+    }
+
+    @Test
+    fun `logs grants it can't follow without a channel map`() {
+        val result = tierThree(emptyMap())
+        assertTrue(result.calls.isEmpty())
+        assertTrue(result.log.any { "LCN 5 isn't in the DMR channel map" in it }, "log: ${result.log.take(5)}")
+    }
+
+    @Test
+    fun `reads channel maps typed in or from sdrtrunk playlists`() {
+        assertEquals(
+            mapOf(1 to 451_112_500L, 2 to 451_612_500L, 3 to 452_137_500L),
+            DmrChannelMap.parse("1, 451.1125\n2 = 451.6125 MHz\n; comment\n3 452137500\nbad line"),
+        )
+        val xml = """
+            <playlist version="4">
+              <channel system="Biz" name="Tier III" enabled="true">
+                <source_configuration type="sourceConfigTuner" frequency="451000000"/>
+                <decode_configuration type="decodeConfigDMR" traffic_channel_pool_size="2">
+                  <timeslot lsn="1" downlink="451112500" uplink="456112500"/>
+                  <timeslot lsn="2" downlink="451612500" uplink="456612500"/>
+                </decode_configuration>
+              </channel>
+            </playlist>
+        """.trimIndent()
+        val playlist = PlaylistImporter.parse(xml.byteInputStream())
+        val channel = playlist.channels.single()
+        assertEquals(mapOf(1 to 451_112_500L, 2 to 451_612_500L), channel.dmrChannels)
+        val again = PlaylistImporter.parse(PlaylistWriter.write(playlist).byteInputStream())
+        assertEquals(channel.dmrChannels, again.channels.single().dmrChannels)
     }
 
     @Test

@@ -41,6 +41,8 @@ data class RadioConfig(
     val simulcast: Boolean = false,
     /** Which calls are saved as WAV files; "marked" follows the record flag on sdrtrunk aliases. */
     val recordMode: RecordMode = RecordMode.MARKED,
+    /** DMR trunking: "LCN, MHz" lines, added to any map the picked playlist channel carries. */
+    val dmrChannelMap: String = "",
 ) {
     val effectiveCenterHz: Long get() = if (centerHz > 0) centerHz else frequencyHz + RadioEngine.TUNER_OFFSET_HZ
 
@@ -89,6 +91,7 @@ class ConfigStore(context: Context) {
             scanHangMs = prefs.getInt("scanHangMs", defaults.scanHangMs),
             simulcast = prefs.getBoolean("simulcast", defaults.simulcast),
             recordMode = runCatching { RecordMode.valueOf(prefs.getString("recordMode", null)!!) }.getOrDefault(defaults.recordMode),
+            dmrChannelMap = prefs.getString("dmrChannelMap", defaults.dmrChannelMap)!!,
         )
     }
 
@@ -115,6 +118,7 @@ class ConfigStore(context: Context) {
             .putInt("scanHangMs", config.scanHangMs)
             .putBoolean("simulcast", config.simulcast)
             .putString("recordMode", config.recordMode.name)
+            .putString("dmrChannelMap", config.dmrChannelMap)
             .apply()
     }
 }

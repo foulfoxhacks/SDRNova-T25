@@ -35,6 +35,8 @@ data class PlaylistChannel(
     /** P25 modulation: C4FM or LSM (simulcast). */
     val modulation: String?,
     val aliasList: String?,
+    /** DMR trunking: logical channel number to downlink frequency, from sdrtrunk's timeslot map. */
+    val dmrChannels: Map<Int, Long> = emptyMap(),
 ) {
     /** Tells channels apart for scan lists, since sdrtrunk doesn't require unique names. */
     val key: String get() = "$system/$site/$name/${frequencies.firstOrNull() ?: 0}"
@@ -115,6 +117,14 @@ object PlaylistImporter {
             decoderType = decoderType,
             modulation = decode?.getAttribute("modulation")?.takeIf { it.isNotEmpty() },
             aliasList = children(element, "alias_list_name").firstOrNull()?.textContent?.trim()?.takeIf { it.isNotEmpty() },
+            // sdrtrunk names the attribute lsn for history; it holds the 1-based logical channel number.
+            dmrChannels = decode?.let { config ->
+                children(config, "timeslot").mapNotNull { slot ->
+                    val lcn = slot.getAttribute("lsn").toIntOrNull() ?: return@mapNotNull null
+                    val downlink = slot.getAttribute("downlink").toLongOrNull()?.takeIf { it > 0 } ?: return@mapNotNull null
+                    lcn to downlink
+                }.toMap()
+            } ?: emptyMap(),
         )
     }
 
@@ -254,7 +264,19 @@ object PlaylistWriter {
         append("    <decode_configuration")
         attribute("xsi:type", channel.decoderType.ifEmpty { channel.protocol.decoderType })
         channel.modulation?.let { attribute("modulation", it) }
-        append("/>\n")
+        if (channel.dmrChannels.isEmpty()) {
+            append("/>\n")
+        } else {
+            append(">\n")
+            for ((lcn, downlink) in channel.dmrChannels.entries.sortedBy { it.key }) {
+                append("      <timeslot")
+                attribute("lsn", lcn.toString())
+                attribute("downlink", downlink.toString())
+                attribute("uplink", "0")
+                append("/>\n")
+            }
+            append("    </decode_configuration>\n")
+        }
         append("  </channel>\n")
     }
 
